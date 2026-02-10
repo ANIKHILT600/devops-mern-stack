@@ -65,7 +65,7 @@ Provision Jenkins EC2 instance with below configuration:
 - Name: Jenkins-Server
 - OS : Ubuntu 22.04
 - Instance type : t2.2xlarge
-- Security group : open inbound rule on 8080 and 9090
+- Security group : open inbound rule on 8080 and 9000
 - Proceed without Key Pair
 - IAM instance profile : create one IAM role for EC2 with administrator access (not recommended, just for demo)
 - create
@@ -107,6 +107,67 @@ sudo apt-get update -y
 sudo apt-get install jenkins -y
 ```
 
+**Optional**:
+
+*If you don't want to install Jenkins, you can create a container of Jenkins*
+```
+docker run -d -p 8080:8080 -p 50000:50000 --name jenkins-container jenkins/jenkins:lts
+
+docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+But, jenkins container may not have trivy and docker cli to process the pipeline stages like (file scan docker image build). So can use Custom Jenkins Docker Image (Best practice):
+
+
+1️⃣ Create a Dockerfile on the EC2(Jenkin-Server) host
+```
+FROM jenkins/jenkins:lts
+
+USER root
+
+RUN apt-get update && \
+    apt-get install -y wget gnupg lsb-release docker.io awscli && \
+    wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+      | tee /usr/share/keyrings/trivy.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] \
+      https://aquasecurity.github.io/trivy-repo/deb bookworm main" \
+      | tee /etc/apt/sources.list.d/trivy.list && \
+    apt-get update && \
+    apt-get install -y trivy && \
+    apt-get clean
+
+USER jenkins
+```
+
+2️⃣ Build the custom Jenkins image
+```
+docker build -t jenkins-devsecops:lts .
+```
+
+3️⃣ Run Jenkins with Docker socket (IMPORTANT)
+```
+docker stop jenkins //if you are using jenkins image without trivy and/or docker cli, and already configure jenkins then
+docker rm jenkins // remove if already using cotainer image
+```
+Run Jenkins with Docker socket:
+```
+docker run -d \
+  --name jenkins \
+  -p 8080:8080 \
+  -p 50000:50000 \
+  -v jenkins_home:/var/jenkins_home \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  jenkins-devsecops:lts
+```
+
+4️⃣ Verify inside container
+```
+docker exec -it jenkins trivy version
+docker exec -it jenkins docker version
+```
+Your pipeline will now work. You did not lose Jenkins configuration because Jenkins data is stored in a persistent Docker volume(var/jenkins_home), not inside the Jenkins image/container.
+
+
 **Installing Docker**
 ```
 sudo apt install docker.io -y
@@ -125,12 +186,9 @@ sudo chmod 777 /var/run/docker.sock
 
 Note: “Granting 777 on docker.sock is insecure and used only for learning.”
 
-*If you don't want to install Jenkins, you can create a container of Jenkins*
-```
-docker run -d -p 8080:8080 -p 50000:50000 --name jenkins-container jenkins/jenkins:lts
-```
 
 **Install Sonarqube**
+
 In production organizations, provision dedicated server for Sonarqube is recommended. But for this demo we will use same Jenkins-Server.
 
 Run Docker Container of Sonarqube:
@@ -238,6 +296,32 @@ EKS control plane creation succeeded, but managed node groups failed due to boot
 ```
 eksctl create cluster -f cluster-ec2.yaml
 ```
+
+**Troubleshooting(optional)**
+1. Check if your cluster is private or not. Check current endpoint configuration :
+
+```
+aws eks describe-cluster \
+  --name Three-Tier-Cluster \
+  --region us-east-1 \
+  --query "cluster.resourcesVpcConfig"
+```
+2. If your public access is true, then do below to make it private:
+```
+aws eks update-cluster-config \
+  --name Three-Tier-Cluster \
+  --region us-east-1 \
+  --resources-vpc-config \
+  endpointPublicAccess=false,endpointPrivateAccess=true
+```
+3. Update and check kubeconfig:
+```
+aws eks update-kubeconfig --name Three-Tier-Cluster
+
+kubectl get nodes
+```
+
+
 ---
 
 
@@ -442,7 +526,7 @@ Replace vpcId=<vpc#>.
 
 - Click on Create
 
-- Provide the **name** (jenkins) and in the **URL**, provide the Jenkins server public IP with port 8080, add sonarqube-webhook in the suffix, and click on Create (http://<jenkin-server-public-ip>:8080/sonarqube-webhook/).
+- Provide the **name** (jenkins) and in the **URL**, provide the Jenkins server public IP with port 8080, add sonarqube-webhook in the suffix, and click on Create **(http://<jenkin-server-public-ip>:8080/sonarqube-webhook/)**.
 
 - create
 
@@ -461,7 +545,7 @@ Replace vpcId=<vpc#>.
 
 - Click on **Locally** under **overview**
 
-- Select the **Use existing token** and click on Continue.
+- Select the **Use existing token**, provide sonar token (three-tier) and click on Continue.
 
 - Select Other and Linux as OS.
 
@@ -916,6 +1000,30 @@ What it does: This is the most critical stage for automation. It uses sed to fin
 
 Note: Do it on Jump-server, for our demo. Recommended to install and configure it on dedicated server.
 
+**Troubleshooting**:
+1. I was not able to open argocd UI. I troubleshoot it and found due to Single small EC2 node (t3.small) resources was exosted and argocd resources/pod was in pending state.
+```
+kubectl get pods -n argocd
+```
+2. 
+- Step 1: Check your nodegroup name
+```
+eksctl get nodegroup --cluster demo-cluster --region us-east-1
+```
+- Step 2: Scale node count (add one more node)
+```
+eksctl scale nodegroup --cluster demo-cluster --region us-east-1 --name ng-1 --nodes 2
+```
+- Step 3: Verify nodes
+```
+kubectl get nodes
+```
+- Step 4: Verify argocd pods
+```
+kubectl get pods -n argocd
+```
+*End of troubleshooting*
+
 ### Install ArgoCD
 
 Create a separate namespace for it and apply the argocd configuration for installation.
@@ -1131,6 +1239,9 @@ ADDRESS:
 k8s-three-tier-mainlb-1234567890.us-east-1.elb.amazonaws.com
 
 
+**Important Note: If you are managing your subdomain for example claudflare then NO NEED to create route53 just add your ingress ALB to claudflare DNS CNAME record (disable proxy).**
+
+
 ### B. Create a Hosted Zone in Route53
 
 Even though the domain is registered elsewhere, you must create a Hosted Zone in Route53.
@@ -1163,6 +1274,7 @@ ns-xyz.awsdns-34.net
 ### C. Update Name Servers at Your Domain Provider
 
 Now go to your domain registrar (where you bought [tarangan4u.dpdns.org](https://dash.domain.digitalplat.org/panel/main?page=%2Fpanel%2Fmanager%2Ftarangan4u.dpdns.org)) and Replace the existing name servers with the Route53 NS records.
+
 
 **This step is mandatory — without it, Route53 will NOT receive DNS queries.**
 
