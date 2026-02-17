@@ -1,0 +1,94 @@
+---
+- name: Configure Infra Monitoring & Management Server
+  hosts: infra_mgmt
+  become: true
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+        
+    - name: Install Common Utilities
+      apt:
+        name: [wget, curl, unzip, git, software-properties-common, gnupg, lsb-release, python3-pip]
+        state: present
+        
+    # --- Terraform ---
+    - name: Add HashiCorp GPG Key
+      shell: |
+        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+    - name: Add HashiCorp Repo
+      shell: |
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list
+      args:
+        creates: /etc/apt/sources.list.d/hashicorp.list
+
+    - name: Install Terraform
+      apt:
+        name: terraform
+        state: present
+        update_cache: yes
+        
+    # --- Ansible ---
+    - name: Add Ansible PPA
+      apt_repository:
+        repo: ppa:ansible/ansible
+        state: present
+
+    - name: Install Ansible
+      apt:
+        name: ansible
+        state: present
+
+    # --- Docker (for SonarQube) ---
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Start Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+        
+    - name: Add User to Docker Group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Ensure Docker Socket Permissions
+      file:
+        path: /var/run/docker.sock
+        mode: '0777'
+
+    # --- SonarQube (Container) ---
+    - name: Run SonarQube Container
+      docker_container:
+        name: sonar
+        image: sonarqube:lts-community
+        ports:
+          - "9000:9000"
+        state: started
+        restart_policy: always
+
+    # --- Trivy ---
+    - name: Add Trivy Repo
+      shell: |
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
+        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | tee -a /etc/apt/sources.list.d/trivy.list
+      args:
+        creates: /etc/apt/sources.list.d/trivy.list
+
+    - name: Install Trivy
+      apt:
+        name: trivy
+        state: present
+        update_cache: yes

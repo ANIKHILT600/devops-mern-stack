@@ -1,0 +1,25 @@
+# General Configuration
+project_name: "three-tier-app"
+environment: "dev"
+
+# Jenkins Configuration
+jenkins_admin_user: "admin"
+jenkins_admin_password: "admin_password_changed_later"
+jenkins_java_opts: "-Djenkins.install.runSetupWizard=false"
+
+# User-Provided Secrets (Override these via CLI extra-vars or a secrets.yml)
+sonar_token: "CHANGE_ME_IN_EXTRA_VARS"
+github_username: "anikhilt600"
+github_token: "CHANGE_ME_IN_EXTRA_VARS"
+aws_access_key: "CHANGE_ME_IN_EXTRA_VARS"
+aws_secret_key: "CHANGE_ME_IN_EXTRA_VARS"
+aws_account_id: "CHANGE_ME_IN_EXTRA_VARS"
+
+# Tool Versions
+kubectl_version: "v1.28.4"
+eksctl_version: "latest" # or specify check
+helm_version: "latest"
+
+# EKS Configuration
+argocd_version: "v2.4.7"
+aws_lb_controller_version: "v2.5.4"

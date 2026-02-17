@@ -1,0 +1,55 @@
+---
+- name: Configure Jump Server
+  hosts: jump_server
+  become: true
+  vars_files:
+    - group_vars/all.yml
+    
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Dependencies
+      apt:
+        name: [unzip, curl, jq, git]
+        state: present
+
+    - name: Install AWS CLI v2
+      unarchive:
+        src: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+        dest: "/tmp"
+        remote_src: yes
+      args:
+        creates: /tmp/aws/install
+
+    - name: Run AWS CLI Install Script
+      command: /tmp/aws/install --update
+      register: aws_install
+      changed_when: "'You can now run' in aws_install.stdout"
+
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Install eksctl
+      shell: |
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        mv /tmp/eksctl /usr/local/bin
+      args:
+        creates: /usr/local/bin/eksctl
+
+    - name: Install Helm
+      snap:
+        name: helm
+        classic: yes
+
+    - name: Clone Repository
+      git:
+        repo: 'https://github.com/ANIKHILT600/devops-mern-stack.git'
+        dest: /home/ubuntu/devops-mern-stack
+        version: main
+        force: yes

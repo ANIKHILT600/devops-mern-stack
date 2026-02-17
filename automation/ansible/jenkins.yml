@@ -1,0 +1,203 @@
+---
+- name: Configure Jenkins Server (CI/CD Master)
+  hosts: jenkins_server
+  become: true
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Common Dependencies
+      apt:
+        name: [openjdk-17-jre, openjdk-17-jdk, wget, curl, git, gnupg]
+        state: present
+
+    - name: Add Jenkins Key
+      get_url:
+        url: https://pkg.jenkins.io/debian/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+
+    - name: Add Jenkins Repo
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian binary/"
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Create Jenkins Init Directory
+      file:
+        path: /var/lib/jenkins/init.groovy.d
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Configure Jenkins Security (Admin User)
+      copy:
+        dest: /var/lib/jenkins/init.groovy.d/01-security.groovy
+        content: |
+          #!groovy
+          import jenkins.model.*
+          import hudson.security.*
+          import jenkins.install.*
+
+          def instance = Jenkins.getInstance()
+          def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+          hudsonRealm.createAccount("{{ jenkins_admin_user }}", "{{ jenkins_admin_password }}")
+          instance.setSecurityRealm(hudsonRealm)
+
+          def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+          instance.setAuthorizationStrategy(strategy)
+          instance.save()
+          InstallState.INITIAL_SETUP_COMPLETED.initializeState()
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+      notify: Restart Jenkins
+
+    - name: Configure Jenkins Credentials & Agent
+      copy:
+        dest: /var/lib/jenkins/init.groovy.d/02-agent-setup.groovy
+        content: |
+          #!groovy
+          import jenkins.model.*
+          import com.cloudbees.plugins.credentials.*
+          import com.cloudbees.plugins.credentials.common.*
+          import com.cloudbees.plugins.credentials.domains.*
+          import com.cloudbees.jenkins.plugins.sshcredentials.impl.*
+          import hudson.plugins.sshslaves.*
+          import hudson.model.*
+          import hudson.slaves.*
+          import hudson.tools.*
+
+          // 1. Add SSH Private Key Credential
+          def key = """{{ lookup('file', 'private_key.pem') }}"""
+          def credentialsStore = SystemCredentialsProvider.getInstance().getStore()
+          def domain = Domain.global()
+          def privateKey = new BasicSSHUserPrivateKey(
+            CredentialsScope.GLOBAL,
+            "infra-ssh-key",
+            "ubuntu",
+            new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(key),
+            "",
+            "SSH Key for Agents"
+          )
+          credentialsStore.addCredentials(domain, privateKey)
+
+          // 2. Add SonarQube Token
+          import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+          def sonarToken = new StringCredentialsImpl(
+             CredentialsScope.GLOBAL,
+             "sonar-token",
+             "SonarQube Token",
+             Secret.fromString("{{ sonar_token }}")
+          )
+          credentialsStore.addCredentials(domain, sonarToken)
+          
+          // 3. Add GitHub Credentials (Username/Password)
+          import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+          def githubCreds = new UsernamePasswordCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            "GITHUB",
+            "GitHub Credentials",
+            "{{ github_username }}",
+            "{{ github_token }}"
+          )
+          credentialsStore.addCredentials(domain, githubCreds)
+
+          // 4. Add GitHub Token (Secret Text)
+          def githubToken = new StringCredentialsImpl(
+             CredentialsScope.GLOBAL,
+             "github",
+             "GitHub Token",
+             Secret.fromString("{{ github_token }}")
+          )
+          credentialsStore.addCredentials(domain, githubToken)
+          
+          // 5. Add AWS Credentials
+          import com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl
+          def awsCreds = new AWSCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            "aws_creds",
+            "AWS Access Keys",
+            "{{ aws_access_key }}",
+            "{{ aws_secret_key }}",
+            ""
+          )
+          credentialsStore.addCredentials(domain, awsCreds)
+          
+          // 6. Add AWS Account ID
+          def accountId = new StringCredentialsImpl(
+             CredentialsScope.GLOBAL,
+             "AWS_ACCOUNT_ID",
+             "AWS Account ID",
+             Secret.fromString("{{ aws_account_id }}")
+          )
+          credentialsStore.addCredentials(domain, accountId)
+          
+          // 7. Add ECR Repo Names
+          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_FRONTEND", "Frontend Repo", Secret.fromString("three-tier-frontend")))
+          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_BACKEND", "Backend Repo", Secret.fromString("three-tier-backend")))
+
+
+          // 8. Configure Agent Node (Infra Mgmt Server)
+          def agentName = "infra-mgmt"
+          def agentDesc = "Infrastructure Management Server"
+          def agentPath = "/home/ubuntu/jenkins_agent"
+          def agentIp = "{{ infra_mgmt_private_ip }}"
+          
+          // Check if node exists
+          if (Jenkins.instance.getNode(agentName) == null) {
+              def launcher = new SSHLauncher(
+                  agentIp, // Host
+                  22, // Port
+                  "infra-ssh-key", // Credentials ID
+                  (String)null, // JVM Options
+                  (String)null, // Java Path
+                  (String)null, // Prefix Start Slave Command
+                  (String)null, // Suffix Start Slave Command
+                  (Integer)null, // Launch Timeout
+                  (Integer)null, // Max Retries
+                  (Integer)null, // Retry Wait Time
+                  new NonVerifyingKeyVerificationStrategy() // Host Key Verification Strategy
+              )
+              
+              DumbSlave agent = new DumbSlave(
+                  agentName,
+                  agentDesc,
+                  agentPath,
+                  "2", // # Executors
+                  Node.Mode.NORMAL,
+                  "infra-mgmt", // Labels
+                  launcher,
+                  new RetentionStrategy.Always(),
+                  new LinkedList()
+              )
+              Jenkins.instance.addNode(agent)
+              println "Agent ${agentName} created successfully"
+          }
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+      notify: Restart Jenkins
+
+    - name: Install Jenkins Plugins
+      shell: |
+        java -jar /usr/share/jenkins/jenkins.war --plugin-cli --plugins \
+        workflow-aggregator git sonar pipeline-stage-view workflow-job blueocean dependency-check-jenkins-plugin credentials-binding aws-credentials ssh-slaves plain-credentials
+      ignore_errors: yes
+      notify: Restart Jenkins
+
+  handlers:
+    - name: Restart Jenkins
+      service:
+        name: jenkins
+        state: restarted

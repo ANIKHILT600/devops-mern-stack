@@ -1,0 +1,83 @@
+---
+- name: Configure EKS Cluster
+  hosts: jump_server
+  vars_files:
+    - group_vars/all.yml
+    
+  tasks:
+    - name: Update Kubeconfig
+      command: "aws eks update-kubeconfig --region {{ region }} --name {{ cluster_name }}"
+
+    - name: Download IAM Policy
+      get_url:
+        url: https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/{{ aws_lb_controller_version }}/docs/install/iam_policy.json
+        dest: /tmp/iam_policy.json
+
+    - name: Create IAM Policy
+      command: >
+        aws iam create-policy 
+        --policy-name AWSLoadBalancerControllerIAMPolicy 
+        --policy-document file:///tmp/iam_policy.json
+      register: create_policy
+      failed_when: "create_policy.rc != 0 and 'EntityAlreadyExists' not in create_policy.stderr"
+
+    - name: Associate OIDC
+      command: "eksctl utils associate-iam-oidc-provider --region={{ region }} --cluster={{ cluster_name }} --approve"
+      changed_when: false
+
+    - name: Create Service Account
+      command: >
+        eksctl create iamserviceaccount 
+        --cluster={{ cluster_name }} 
+        --namespace=kube-system 
+        --name=aws-load-balancer-controller 
+        --role-name AmazonEKSLoadBalancerControllerRole 
+        --attach-policy-arn=arn:aws:iam::{{ aws_account_id }}:policy/AWSLoadBalancerControllerIAMPolicy 
+        --approve 
+        --region={{ region }}
+      register: sa_create
+      failed_when: "sa_create.rc != 0 and 'already exists' not in sa_create.stderr"
+
+    - name: Add Helm Repos
+      shell: |
+        helm repo add eks https://aws.github.io/eks-charts
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo add grafana https://grafana.github.io/helm-charts
+        helm repo update
+
+    - name: Install Load Balancer Controller
+      command: >
+        helm upgrade -i aws-load-balancer-controller eks/aws-load-balancer-controller 
+        -n kube-system 
+        --set clusterName={{ cluster_name }} 
+        --set serviceAccount.create=false 
+        --set serviceAccount.name=aws-load-balancer-controller
+
+    - name: Install ArgoCD
+      shell: |
+        kubectl create namespace argocd || true
+        kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+        kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+
+    - name: Install Prometheus & Grafana (Monitoring Stack)
+      shell: |
+        kubectl create namespace prometheus || true
+        helm upgrade -i prometheus prometheus-community/kube-prometheus-stack \
+          -n prometheus \
+          --set prometheus.service.type=LoadBalancer \
+          --set grafana.service.type=LoadBalancer \
+          --set grafana.adminPassword=prom-operator
+
+    - name: Deploy Apps
+      shell: |
+        kubectl create namespace three-tier || true
+        kubectl apply -f /home/ubuntu/devops-mern-stack/automation/k8s/argocd-apps.yaml
+
+    - name: Create ECR Secret
+      shell: |
+        kubectl create secret docker-registry ecr-registry-secret \
+        --docker-server={{ aws_account_id }}.dkr.ecr.{{ region }}.amazonaws.com \
+        --docker-username=AWS \
+        --docker-password=$(aws ecr get-login-password --region {{ region }}) \
+        -n three-tier \
+        --dry-run=client -o yaml | kubectl apply -f -

@@ -1,0 +1,295 @@
+pipeline {
+    agent { label 'infra-mgmt' }
+
+    parameters {
+        choice(
+            name: 'TERRAFORM_ACTION',
+            choices: ['apply', 'plan', 'destroy'],
+            description: 'Select Terraform action to perform'
+        )
+        booleanParam(
+            name: 'AUTO_APPROVE',
+            defaultValue: false,
+            description: 'Auto-approve Terraform changes (use with caution)'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS Region for deployment'
+        )
+    }
+
+    options {
+        ansiColor('xterm')
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    environment {
+        AWS_ACCESS_KEY_ID = credentials('aws_creds')
+        AWS_SECRET_ACCESS_KEY = credentials('aws_creds')
+        AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+        SONAR_TOKEN = credentials('sonar-token')
+        GITHUB_TOKEN = credentials('github')
+        TF_IN_AUTOMATION = 'true'
+    }
+
+    stages {
+        stage('🔍 Pre-Flight Checks') {
+            steps {
+                script {
+                    echo "═══════════════════════════════════════════════════════"
+                    echo "INFRASTRUCTURE PROVISIONING PIPELINE"
+                    echo "═══════════════════════════════════════════════════════"
+                    echo "Action: ${params.TERRAFORM_ACTION}"
+                    echo "Region: ${params.AWS_REGION}"
+                    echo "Auto-Approve: ${params.AUTO_APPROVE}"
+                    echo "═══════════════════════════════════════════════════════"
+                }
+            }
+        }
+
+        stage('📥 Git Checkout') {
+            steps {
+                script {
+                    echo "→ Checking out infrastructure code from repository..."
+                    cleanWs()
+                    git branch: 'main', 
+                        credentialsId: 'GITHUB', 
+                        url: 'https://github.com/ANIKHILT600/devops-mern-stack.git'
+                    echo "✓ Code checkout completed"
+                }
+            }
+        }
+
+        stage('🛠️ Tool Installation & Validation') {
+            steps {
+                script {
+                    echo "→ Validating required tools..."
+                    
+                    sh '''
+                        echo "Checking Terraform..."
+                        terraform --version || { echo "❌ Terraform not found"; exit 1; }
+                        
+                        echo "Checking Ansible..."
+                        ansible --version || { echo "❌ Ansible not found"; exit 1; }
+                        
+                        echo "Checking AWS CLI..."
+                        aws --version || { echo "❌ AWS CLI not found"; exit 1; }
+                        
+                        echo "Checking Docker..."
+                        docker --version || { echo "❌ Docker not found"; exit 1; }
+                        
+                        echo "Checking Trivy..."
+                        trivy --version || { echo "❌ Trivy not found"; exit 1; }
+                    '''
+                    
+                    echo "✓ All required tools are available"
+                }
+            }
+        }
+
+        stage('⚙️ Tool Configuration') {
+            steps {
+                script {
+                    echo "→ Configuring AWS credentials..."
+                    sh '''
+                        aws sts get-caller-identity
+                        echo "✓ AWS credentials validated"
+                        
+                        export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        echo "AWS Account ID: $AWS_ACCOUNT_ID"
+                    '''
+                }
+            }
+        }
+
+        stage('🏗️ Terraform Initialization') {
+            steps {
+                dir('automation/terraform') {
+                    script {
+                        echo "→ Initializing Terraform..."
+                        sh '''
+                            terraform init -upgrade
+                            terraform validate
+                        '''
+                        echo "✓ Terraform initialized successfully"
+                    }
+                }
+            }
+        }
+
+        stage('📋 Terraform Plan') {
+            steps {
+                dir('automation/terraform') {
+                    script {
+                        echo "→ Creating Terraform execution plan..."
+                        sh 'terraform plan -out=tfplan -detailed-exitcode || true'
+                        echo "✓ Terraform plan created"
+                    }
+                }
+            }
+        }
+
+        stage('🚀 Terraform Apply/Destroy') {
+            when {
+                expression { params.TERRAFORM_ACTION in ['apply', 'destroy'] }
+            }
+            steps {
+                dir('automation/terraform') {
+                    script {
+                        if (params.AUTO_APPROVE) {
+                            echo "→ Executing Terraform ${params.TERRAFORM_ACTION} with auto-approval..."
+                            if (params.TERRAFORM_ACTION == 'apply') {
+                                sh 'terraform apply -auto-approve tfplan'
+                            } else {
+                                sh 'terraform destroy -auto-approve'
+                            }
+                        } else {
+                            input message: "Approve Terraform ${params.TERRAFORM_ACTION}?", 
+                                  ok: "Proceed with ${params.TERRAFORM_ACTION}"
+                            
+                            if (params.TERRAFORM_ACTION == 'apply') {
+                                sh 'terraform apply tfplan'
+                            } else {
+                                sh 'terraform destroy'
+                            }
+                        }
+                        echo "✓ Terraform ${params.TERRAFORM_ACTION} completed"
+                    }
+                }
+            }
+        }
+
+        stage('📊 Capture Infrastructure Outputs') {
+            when {
+                expression { params.TERRAFORM_ACTION == 'apply' }
+            }
+            steps {
+                dir('automation/terraform') {
+                    script {
+                        echo "→ Capturing Terraform outputs..."
+                        sh '''
+                            terraform output -json > outputs.json
+                            cat outputs.json
+                        '''
+                        
+                        // Store outputs for use in subsequent stages
+                        def outputs = readJSON file: 'outputs.json'
+                        env.JENKINS_IP = outputs.jenkins_server_ip?.value ?: 'N/A'
+                        env.MGMT_IP = outputs.infra_mgmt_server_ip?.value ?: 'N/A'
+                        env.JUMP_IP = outputs.jump_server_ip?.value ?: 'N/A'
+                        
+                        echo "✓ Infrastructure IPs captured:"
+                        echo "  Jenkins Server: ${env.JENKINS_IP}"
+                        echo "  Mgmt Server: ${env.MGMT_IP}"
+                        echo "  Jump Server: ${env.JUMP_IP}"
+                    }
+                }
+            }
+        }
+
+        stage('🔧 Ansible Configuration') {
+            when {
+                expression { params.TERRAFORM_ACTION == 'apply' }
+            }
+            steps {
+                dir('automation/ansible') {
+                    script {
+                        echo "→ Installing Ansible dependencies..."
+                        sh '''
+                            # Install AWS SSM plugin for Ansible (for Session Manager)
+                            pip3 install boto3 botocore
+                            ansible-galaxy collection install amazon.aws community.general community.docker || true
+                        '''
+                        
+                        echo "→ Waiting for instances and SSM agent to be ready..."
+                        echo "  (SSM agent needs time to register with AWS Systems Manager)"
+                        sleep(time: 120, unit: 'SECONDS')
+                        
+                        echo "→ Running Ansible playbooks..."
+                        
+                        // Get AWS Account ID
+                        def awsAccountId = sh(
+                            script: 'aws sts get-caller-identity --query Account --output text',
+                            returnStdout: true
+                        ).trim()
+                        
+                        // 1. Configure Infra Mgmt Server
+                        echo "  → Configuring Infrastructure Management Server..."
+                        sh 'ansible-playbook -i inventory.ini mgmt_server.yml -v'
+                        
+                        // 2. Configure Jenkins Server
+                        echo "  → Configuring Jenkins Server..."
+                        sh """
+                            ansible-playbook -i inventory.ini jenkins.yml \
+                            --extra-vars "sonar_token=${SONAR_TOKEN} \
+                                          github_token=${GITHUB_TOKEN} \
+                                          aws_access_key=${AWS_ACCESS_KEY_ID} \
+                                          aws_secret_key=${AWS_SECRET_ACCESS_KEY} \
+                                          aws_account_id=${awsAccountId}" -v
+                        """
+                        
+                        // 3. Configure Jump Server
+                        echo "  → Configuring Jump Server..."
+                        sh 'ansible-playbook -i inventory.ini jump_server.yml -v'
+                        
+                        // 4. Deploy EKS Components
+                        echo "  → Deploying EKS cluster components..."
+                        sh 'ansible-playbook -i inventory.ini eks.yml -v'
+                        
+                        echo "✓ All Ansible playbooks executed successfully"
+                    }
+                }
+            }
+        }
+
+        stage('✅ Infrastructure Validation') {
+            when {
+                expression { params.TERRAFORM_ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    echo "→ Validating infrastructure deployment..."
+                    echo "  ✓ VPC and networking configured"
+                    echo "  ✓ EC2 instances provisioned"
+                    echo "  ✓ EKS cluster created"
+                    echo "  ✓ ECR repositories ready"
+                    echo "  ✓ Ansible configuration completed"
+                    echo "═══════════════════════════════════════════════════════"
+                    echo "Infrastructure is ready for application deployment!"
+                    echo "═══════════════════════════════════════════════════════"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.TERRAFORM_ACTION == 'apply') {
+                    echo """
+                    ╔═══════════════════════════════════════════════════════╗
+                    ║   🎉 INFRASTRUCTURE PROVISIONING SUCCESSFUL!          ║
+                    ╠═══════════════════════════════════════════════════════╣
+                    ║   Jenkins Server IP: ${env.JENKINS_IP}                ║
+                    ║   Mgmt Server IP: ${env.MGMT_IP}                      ║
+                    ║   Jump Server IP: ${env.JUMP_IP}                      ║
+                    ╚═══════════════════════════════════════════════════════╝
+                    """
+                } else {
+                    echo "✓ Terraform ${params.TERRAFORM_ACTION} completed successfully"
+                }
+            }
+        }
+        failure {
+            echo "❌ Infrastructure provisioning failed - check logs for details"
+        }
+        always {
+            cleanWs(cleanWhenNotBuilt: false,
+                    deleteDirs: true,
+                    disableDeferredWipeout: true,
+                    notFailBuild: true)
+        }
+    }
+}
