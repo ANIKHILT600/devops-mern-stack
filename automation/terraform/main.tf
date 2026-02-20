@@ -200,14 +200,18 @@ locals {
     # Completion marker: /tmp/userdata-complete
     # ─────────────────────────────────────────────────────────────────
     exec > /var/log/userdata.log 2>&1
-    set -e
+    # set -e
+    # Trap errors: log the failing line number instead of a silent exit
+    set -euo pipefail
+    trap 'echo "=== ERROR: Script failed at line $LINENO. Check /var/log/userdata.log ===" >&2' ERR
 
     echo "=== [1/10] Updating system packages ==="
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y wget curl unzip git gnupg lsb-release \
       software-properties-common apt-transport-https ca-certificates \
-      python3 python3-pip openjdk-17-jre
+      # python3 python3-pip openjdk-17-jre
+      python3 python3-pip python3-venv openjdk-17-jre
 
     echo "=== [2/10] Installing SSM Agent ==="
     if ! systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
@@ -225,9 +229,25 @@ locals {
     apt-get update -y && apt-get install -y terraform
 
     echo "=== [4/10] Installing Ansible + AWS Python libs ==="
-    pip3 install --break-system-packages ansible boto3 botocore
+    # pip3 install --break-system-packages ansible boto3 botocore
     # Install required Ansible collections
-    su - ubuntu -c "ansible-galaxy collection install community.docker amazon.aws community.general --upgrade" || true
+    # su - ubuntu -c "ansible-galaxy collection install community.docker amazon.aws community.general --upgrade" || true
+    # Ubuntu 22.04 (Jammy) ships pip 22.0.x which does NOT support
+    # --break-system-packages. Use a dedicated virtualenv instead.
+    python3 -m venv /opt/devops-venv
+    /opt/devops-venv/bin/pip install --upgrade pip
+    /opt/devops-venv/bin/pip install ansible boto3 botocore
+
+    # Symlink binaries so they are on PATH system-wide
+    ln -sf /opt/devops-venv/bin/ansible       /usr/local/bin/ansible
+    ln -sf /opt/devops-venv/bin/ansible-playbook /usr/local/bin/ansible-playbook
+    ln -sf /opt/devops-venv/bin/ansible-galaxy   /usr/local/bin/ansible-galaxy
+
+    # Make ubuntu user's shell use the venv Python (for boto3 imports etc.)
+    echo 'source /opt/devops-venv/bin/activate' >> /home/ubuntu/.bashrc
+
+    # Install required Ansible collections as ubuntu user
+    su - ubuntu -c "source /opt/devops-venv/bin/activate && ansible-galaxy collection install community.docker amazon.aws community.general --upgrade" || true
 
     echo "=== [5/10] Installing AWS CLI v2 ==="
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip

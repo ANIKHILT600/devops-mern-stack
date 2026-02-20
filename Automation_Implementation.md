@@ -182,6 +182,8 @@ aws s3api create-bucket \
   --bucket "three-tier-app-tfstate-${ACCOUNT_ID}" \
   --region us-east-1
 
+# Can verify using "aws s3 ls"
+
 # 2. Enable versioning (allows rollback to previous state)
 aws s3api put-bucket-versioning \
   --bucket "three-tier-app-tfstate-${ACCOUNT_ID}" \
@@ -333,7 +335,6 @@ trivy --version             # Version: x.x.x
 aws --version               # aws-cli/2.x.x
 java --version              # openjdk 17.x.x
 ls /home/ubuntu/jenkins_agent/   # Directory exists
-
 # Verify SonarQube is running
 docker ps | grep sonar
 # Should show: sonar  sonarqube:lts-community  Up x minutes  0.0.0.0:9000->9000/tcp
@@ -353,12 +354,12 @@ docker ps | grep sonar
 sudo -i
 
 # Clone the repo (this gets the generated inventory.ini + private_key.pem you pushed)
-cd /home/ubuntu
+cd ~
 git clone https://github.com/ANIKHILT600/devops-mern-stack.git
 cd devops-mern-stack/automation/ansible
 
-# Verify inventory has correct IPs
-cat inventory.ini   # Should show actual IP addresses
+# Activate venv (so boto3 is available to Ansible AWS modules. Note we have installed ansible in devops-venv in side infr-mngmt-server)
+source /opt/devops-venv/bin/activate
 
 # Fix private key permissions (required for SSH)
 chmod 400 private_key.pem
@@ -367,21 +368,19 @@ chmod 400 private_key.pem
 ansible jenkins_server -i inventory.ini -m ping
 # Expected: "pong" — if this fails, check security groups allow port 22
 
+> **Getting your GitHub PAT:** GitHub → Settings → Developer Settings → Personal Access Tokens → Tokens (classic) → Generate new. Scopes: `repo`, `workflow`.
+
+> **Getting your SonarQube token:** After first accessing SonarQube UI (`http://<mgmt_ip>:9000`), log in as admin/admin (forced to change), go to My Account → Security → Generate Token. Use that token here.
+
 # Run Jenkins playbook (~10 minutes)
 ansible-playbook -i inventory.ini jenkins.yml \
   --extra-vars "sonar_token=CHANGE_ME \
                 github_token=YOUR_GITHUB_PAT \
                 github_username=ANIKHILT600 \
-                aws_account_id=$(aws sts get-caller-identity --query Account --output text) \
-                aws_access_key=NOT_NEEDED_IAM_ROLE \
-                aws_secret_key=NOT_NEEDED_IAM_ROLE" -v
+                aws_account_id=$(aws sts get-caller-identity --query Account --output text)" -v
 ```
 
-> **Getting your GitHub PAT:** GitHub → Settings → Developer Settings → Personal Access Tokens → Tokens (classic) → Generate new. Scopes: `repo`, `workflow`.
-
-> **Getting your SonarQube token:** After first accessing SonarQube UI (`http://<mgmt_ip>:9000`), log in as admin/admin (forced to change), go to My Account → Security → Generate Token. Use that token here.
-
-- **Outcome:** Jenkins installed on Jenkins Server. Admin user + all credentials + infra-mgmt agent node configured automatically via Groovy init scripts.
+**Outcome:** Jenkins installed on Jenkins Server. Admin user + all credentials + infra-mgmt agent node configured automatically via Groovy init scripts.
 
 ### Post-Install Verification
 

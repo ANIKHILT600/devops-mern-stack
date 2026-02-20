@@ -1,7 +1,7 @@
 # General Configuration
 project_name: "three-tier-app"
 env: "dev"                              # Renamed from 'environment' (reserved Ansible variable name)
-ansible_python_interpreter: /usr/bin/python3  # Must be set here, not in ansible.cfg [defaults]
+ansible_python_interpreter: /opt/devops-venv/bin/python3  # Must be set here, not in ansible.cfg [defaults]
 
 # Jenkins Configuration
 jenkins_admin_user: "admin"
