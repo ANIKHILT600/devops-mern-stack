@@ -99,7 +99,8 @@ pipeline {
                     }
                     
                     // Get Grafana URL
-                    def grafanaURL = runSSMCommand(jumpInstanceId, "kubectl get svc -n prometheus grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'") ?: "Pending"
+                    // NOTE: Helm release name 'prometheus' → service is 'prometheus-grafana'
+                    def grafanaURL = runSSMCommand(jumpInstanceId, "kubectl get svc -n prometheus prometheus-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'") ?: "Pending"
                     
                     // Get Application Ingress URL
                     def appURL = runSSMCommand(jumpInstanceId, "kubectl get ingress -n three-tier -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'") ?: "Pending"

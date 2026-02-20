@@ -43,19 +43,19 @@ variable "azs" {
 variable "jenkins_instance_type" {
   description = "Instance type for Jenkins server"
   type        = string
-  default     = "t2.medium"
+  default     = "m7i-flex.large"
 }
 
 variable "mgmt_instance_type" {
   description = "Instance type for Management server"
   type        = string
-  default     = "t2.medium"
+  default     = "m7i-flex.large"
 }
 
 variable "jump_instance_type" {
   description = "Instance type for Jump server"
   type        = string
-  default     = "t2.micro"
+  default     = "m7i-flex.large"
 }
 
 variable "key_name" {
@@ -65,7 +65,11 @@ variable "key_name" {
 }
 
 variable "ecr_repos" {
-  description = "ECR repository names"
+  description = "ECR repository names — MUST match: (1) the repo portion of 'image:' in K8s-Manifests deployments, (2) the ECR credential values in jenkins.yml Groovy, (3) the AWS_ECR_REPO_NAME used in Jenkinsfile-Backend/Frontend sed command"
   type        = list(string)
-  default     = ["three-tier-frontend", "three-tier-backend"]
+  # index 0 = frontend (→ ecr_frontend_url), index 1 = backend (→ ecr_backend_url)
+  # K8s-Manifests/Backend/deployment.yaml has:  image: <account>.dkr.ecr.../backend:1
+  # K8s-Manifests/Frontend/deployment.yaml has: image: <account>.dkr.ecr.../frontend:1
+  # jenkins.yml Groovy sets: ECR_REPO_BACKEND=backend, ECR_REPO_FRONTEND=frontend
+  default     = ["frontend", "backend"]
 }

@@ -1,1 +1,1 @@
-mgmt_instance_type = "t2.medium"
+mgmt_instance_type = "m7i-flex.large"

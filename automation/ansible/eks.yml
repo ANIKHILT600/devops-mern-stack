@@ -1,11 +1,30 @@
 ---
+# ═══════════════════════════════════════════════════════════════════════
+# PLAYBOOK: Configure EKS Cluster
+#
+# PURPOSE: After the Jump Server tools (kubectl, helm, eksctl) are installed
+#          by jump_server.yml, this playbook configures the EKS cluster by
+#          deploying required controllers and monitoring tools.
+#
+# DEPLOYED COMPONENTS:
+#   - AWS Load Balancer Controller (for Ingress support)
+#   - ArgoCD                       (GitOps continuous delivery)
+#   - Prometheus + Grafana         (kube-prometheus-stack, monitoring)
+#   - ArgoCD App definitions       (from k8s/argocd-apps.yaml)
+#   - ECR pull secret              (for private images)
+#
+# NOTE: Runs on jump_server because it is the only host with kubeconfig
+#       access to the EKS cluster (private subnets).
+# ═══════════════════════════════════════════════════════════════════════
 - name: Configure EKS Cluster
   hosts: jump_server
+  become: false   # kubectl/helm run as ubuntu user, not root
   vars_files:
     - group_vars/all.yml
-    
+
   tasks:
-    - name: Update Kubeconfig
+    - name: Update Kubeconfig for EKS
+      # This must run first — without kubeconfig, all kubectl/helm commands fail
       command: "aws eks update-kubeconfig --region {{ region }} --name {{ cluster_name }}"
 
     - name: Download IAM Policy
@@ -59,14 +78,33 @@
         kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
         kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
 
-    - name: Install Prometheus & Grafana (Monitoring Stack)
+    # CRITICAL WAIT: ArgoCD CRDs (including 'Application' kind) take 60-120s to
+    # register after install.yaml is applied. Applying argocd-apps.yaml before
+    # CRDs are ready causes: "no matches for kind Application in version argoproj.io/v1alpha1"
+    - name: Wait for ArgoCD CRDs to become ready
+      shell: |
+        echo "Waiting for ArgoCD pods to be Running..."
+        kubectl wait --for=condition=available --timeout=300s \
+          deployment/argocd-server \
+          deployment/argocd-repo-server \
+          deployment/argocd-application-controller \
+          -n argocd || true
+        echo "Waiting additional 30s for CRD propagation..."
+        sleep 30
+        echo "ArgoCD is ready."
+
+    # NOTE: The Helm release name 'prometheus' means the Grafana service will be
+    # named 'prometheus-grafana' (not just 'grafana').
+    # Jenkinsfile.master references this correctly as 'prometheus-grafana'.
+    - name: Install Prometheus & Grafana (kube-prometheus-stack)
       shell: |
         kubectl create namespace prometheus || true
         helm upgrade -i prometheus prometheus-community/kube-prometheus-stack \
           -n prometheus \
           --set prometheus.service.type=LoadBalancer \
           --set grafana.service.type=LoadBalancer \
-          --set grafana.adminPassword=prom-operator
+          --set grafana.adminPassword=prom-operator \
+          --wait --timeout=10m
 
     - name: Deploy Apps
       shell: |

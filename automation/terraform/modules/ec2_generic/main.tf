@@ -7,6 +7,14 @@ variable "role_type" {}
 variable "iam_instance_profile" {}
 variable "key_name" { default = "" }
 
+# Optional: Callers can supply a fully custom userdata script.
+# Defaults to the minimal bootstrap (Python3 + SSM Agent) which is
+# all that Ansible needs to connect and configure the server remotely.
+variable "user_data_script" {
+  description = "Custom userdata shell script. Defaults to minimal bootstrap."
+  default     = null
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
   filter {
@@ -26,23 +34,32 @@ resource "aws_instance" "server" {
 
   tags = { Name = "${var.project_name}-${var.role_type}-server" }
   
-  # Install SSM Agent and common tools for Ansible management
-  user_data = <<-EOF
+  # Userdata: use caller-supplied script if provided, otherwise minimal bootstrap
+  user_data = var.user_data_script != null ? var.user_data_script : <<-EOF
               #!/bin/bash
+              # Redirect all output to a log file for debugging
+              exec > /var/log/userdata.log 2>&1
               set -e
-              
-              # Update system
-              apt-get update
-              
-              # Install Python for Ansible
+
+              echo "=== Starting EC2 userdata bootstrap ==="
+
+              # Update package lists
+              apt-get update -y
+
+              # Install Python3 (mandatory for Ansible to connect and run tasks)
               apt-get install -y python3 python3-pip
-              
-              # Install SSM Agent (for AWS Systems Manager Session Manager)
-              snap install amazon-ssm-agent --classic
-              systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
-              systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
-              
-              echo "SSM Agent installed and started successfully"
+
+              # Install SSM Agent for secure AWS Console/CLI access (no PEM key needed)
+              # Ubuntu 22.04 on AWS typically has SSM pre-installed, but we ensure it here
+              if ! systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
+                snap install amazon-ssm-agent --classic || true
+              fi
+              systemctl enable amazon-ssm-agent || true
+              systemctl start amazon-ssm-agent || true
+
+              echo "=== Userdata bootstrap complete ==="
+              # Create a marker file so we can verify completion
+              touch /tmp/userdata-complete
               EOF
 }
 

@@ -1,22 +1,48 @@
 ---
-- name: Configure Jump Server
+# ═══════════════════════════════════════════════════════════════════════
+# PLAYBOOK: Configure Jump Server (Bastion / EKS Gateway)
+#
+# PURPOSE: Install Kubernetes tooling on the Jump Server so Jenkins
+#          pipelines can use it to interact with the EKS cluster.
+#          EKS worker nodes live in PRIVATE subnets — this server is
+#          the only gateway to run kubectl/helm/eksctl commands.
+#
+# TOOLS INSTALLED:
+#   - AWS CLI v2   (ECR login, EKS kubeconfig update)
+#   - kubectl      (Kubernetes resource management)
+#   - eksctl       (EKS cluster operations, OIDC setup)
+#   - Helm         (Install ArgoCD, Prometheus, LB Controller)
+#
+# EXECUTED VIA: Jenkinsfile.infra pipeline (Stage: Ansible Configuration)
+# ═══════════════════════════════════════════════════════════════════════
+- name: Configure Jump Server (Bastion / EKS Gateway)
   hosts: jump_server
   become: true
   vars_files:
     - group_vars/all.yml
-    
+
   tasks:
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Dependencies
+    - name: Install Base Dependencies
       apt:
-        name: [unzip, curl, jq, git]
+        name:
+          - unzip
+          - curl
+          - jq
+          - git
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
         state: present
 
-    - name: Install AWS CLI v2
+    # ─────────────────────────────────────────────
+    # AWS CLI v2
+    # ─────────────────────────────────────────────
+    - name: Download AWS CLI v2 installer
       unarchive:
         src: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
         dest: "/tmp"
@@ -24,30 +50,50 @@
       args:
         creates: /tmp/aws/install
 
-    - name: Run AWS CLI Install Script
+    - name: Install AWS CLI v2
       command: /tmp/aws/install --update
       register: aws_install
       changed_when: "'You can now run' in aws_install.stdout"
 
+    # ─────────────────────────────────────────────
+    # KUBECTL
+    # ─────────────────────────────────────────────
     - name: Install kubectl
       get_url:
         url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
         dest: /usr/local/bin/kubectl
         mode: '0755'
 
+    # ─────────────────────────────────────────────
+    # EKSCTL
+    # ─────────────────────────────────────────────
     - name: Install eksctl
       shell: |
-        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-        mv /tmp/eksctl /usr/local/bin
+        curl --silent --location \
+          "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
+          | tar xz -C /tmp
+        mv -f /tmp/eksctl /usr/local/bin/eksctl
+        chmod +x /usr/local/bin/eksctl
       args:
         creates: /usr/local/bin/eksctl
 
-    - name: Install Helm
-      snap:
-        name: helm
-        classic: yes
+    # ─────────────────────────────────────────────
+    # HELM (Official binary install)
+    # FIX: snap install is NOT reliable on EC2 Ubuntu 22.04
+    # (snapd may not be running). Use official install script.
+    # ─────────────────────────────────────────────
+    - name: Install Helm via official install script
+      shell: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
 
-    - name: Clone Repository
+    # ─────────────────────────────────────────────
+    # CLONE REPO
+    # Needed so eks.yml can apply k8s manifests
+    # from the local repo path on the jump server
+    # ─────────────────────────────────────────────
+    - name: Clone Application Repository
       git:
         repo: 'https://github.com/ANIKHILT600/devops-mern-stack.git'
         dest: /home/ubuntu/devops-mern-stack

@@ -1,15 +1,3 @@
-terraform {
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-    local = { source = "hashicorp/local", version = "~> 2.4" }
-    tls = { source = "hashicorp/tls", version = "~> 4.0" }
-  }
-}
-
-provider "aws" { 
-  region = var.region 
-}
-
 data "aws_caller_identity" "current" {}
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -84,7 +72,7 @@ resource "aws_key_pair" "generated_key" {
 
 resource "local_file" "private_key" {
   content         = tls_private_key.key.private_key_pem
-  filename        = "${path.module}/../../ansible/private_key.pem"
+  filename        = "${path.module}/../ansible/private_key.pem"
   file_permission = "0600"
 }
 
@@ -196,7 +184,99 @@ module "jenkins_server" {
 # SERVER 2: INFRA MANAGEMENT SERVER (Management VPC)
 # Purpose: Jenkins Agent - Runs Terraform, Ansible, SonarQube, Trivy
 # Location: Management VPC, Public Subnet
+#
+# KEY DESIGN: All tools are installed via userdata at boot time.
+# This means ZERO local Ansible is needed to bootstrap this server.
+# After boot (~10 mins), all tools are ready. Ansible is then used
+# FROM THIS SERVER to configure Jenkins Server, Jump Server, and EKS.
 # ═══════════════════════════════════════════════════════════════════════
+
+locals {
+  mgmt_server_userdata = <<-USERDATA
+    #!/bin/bash
+    # ─────────────────────────────────────────────────────────────────
+    # infra-mgmt-server bootstrap: installs ALL DevSecOps tools at boot
+    # Log everything for debugging: cat /var/log/userdata.log
+    # Completion marker: /tmp/userdata-complete
+    # ─────────────────────────────────────────────────────────────────
+    exec > /var/log/userdata.log 2>&1
+    set -e
+
+    echo "=== [1/10] Updating system packages ==="
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y wget curl unzip git gnupg lsb-release \
+      software-properties-common apt-transport-https ca-certificates \
+      python3 python3-pip openjdk-17-jre
+
+    echo "=== [2/10] Installing SSM Agent ==="
+    if ! systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
+      snap install amazon-ssm-agent --classic || true
+    fi
+    systemctl enable amazon-ssm-agent || true
+    systemctl start amazon-ssm-agent || true
+
+    echo "=== [3/10] Installing Terraform ==="
+    wget -O- https://apt.releases.hashicorp.com/gpg | \
+      gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+      https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+      | tee /etc/apt/sources.list.d/hashicorp.list
+    apt-get update -y && apt-get install -y terraform
+
+    echo "=== [4/10] Installing Ansible + AWS Python libs ==="
+    pip3 install --break-system-packages ansible boto3 botocore
+    # Install required Ansible collections
+    su - ubuntu -c "ansible-galaxy collection install community.docker amazon.aws community.general --upgrade" || true
+
+    echo "=== [5/10] Installing AWS CLI v2 ==="
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --update
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+
+    echo "=== [6/10] Installing Docker CE ==="
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+      gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+      https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+      | tee /etc/apt/sources.list.d/docker.list
+    apt-get update -y
+    apt-get install -y docker-ce docker-ce-cli containerd.io \
+      docker-buildx-plugin docker-compose-plugin
+    systemctl enable docker
+    systemctl start docker
+    usermod -aG docker ubuntu
+    chmod 666 /var/run/docker.sock
+
+    echo "=== [7/10] Setting vm.max_map_count for SonarQube ==="
+    sysctl -w vm.max_map_count=262144
+    echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+
+    echo "=== [8/10] Starting SonarQube container ==="
+    docker run -d \
+      --name sonar \
+      --restart unless-stopped \
+      -p 9000:9000 \
+      -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+      sonarqube:lts-community
+
+    echo "=== [9/10] Installing Trivy ==="
+    wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
+      gpg --dearmor -o /usr/share/keyrings/trivy-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/trivy-keyring.gpg] \
+      https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+      | tee /etc/apt/sources.list.d/trivy.list
+    apt-get update -y && apt-get install -y trivy
+
+    echo "=== [10/10] Creating Jenkins Agent workspace ==="
+    mkdir -p /home/ubuntu/jenkins_agent
+    chown ubuntu:ubuntu /home/ubuntu/jenkins_agent
+
+    echo "=== Userdata bootstrap COMPLETE ==="
+    touch /tmp/userdata-complete
+  USERDATA
+}
 
 module "mgmt_server" {
   source                 = "./modules/ec2_generic"
@@ -208,7 +288,9 @@ module "mgmt_server" {
   role_type              = "tools"
   iam_instance_profile   = module.iam.jenkins_profile_name
   key_name               = aws_key_pair.generated_key.key_name
+  user_data_script       = local.mgmt_server_userdata
 }
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # SERVER 3: JUMP SERVER (Production VPC)
@@ -269,5 +351,5 @@ resource "local_file" "ansible_inventory" {
     ecr_backend_url  = module.ecr.repo_urls[1]
     account_id       = data.aws_caller_identity.current.account_id
   })
-  filename = "${path.module}/../../ansible/inventory.ini"
+  filename = "${path.module}/../ansible/inventory.ini"
 }

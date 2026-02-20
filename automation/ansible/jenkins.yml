@@ -13,15 +13,21 @@
 
     - name: Install Common Dependencies
       apt:
-        name: [openjdk-17-jre, openjdk-17-jdk, wget, curl, git, gnupg]
+        name:
+          - openjdk-17-jre
+          - openjdk-17-jdk
+          - wget
+          - curl
+          - git
+          - gnupg
         state: present
 
-    - name: Add Jenkins Key
+    - name: Add Jenkins GPG Key
       get_url:
         url: https://pkg.jenkins.io/debian/jenkins.io-2023.key
         dest: /usr/share/keyrings/jenkins-keyring.asc
 
-    - name: Add Jenkins Repo
+    - name: Add Jenkins Repository
       apt_repository:
         repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian binary/"
         state: present
@@ -31,6 +37,58 @@
         name: jenkins
         state: present
         update_cache: yes
+
+    - name: Start and Enable Jenkins Service
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Wait for Jenkins to become available on port 8080
+      wait_for:
+        port: 8080
+        delay: 15
+        timeout: 120
+        state: started
+
+    # ─────────────────────────────────────────────
+    # PLUGINS
+    # FIX: Use jenkins-plugin-cli (correct method for Jenkins 2.x)
+    # NOT 'java -jar jenkins.war --plugin-cli' (that's for offline installs)
+    # The plugins listed here are all referenced in the Jenkinsfiles:
+    #   - workflow-aggregator  → Pipeline support
+    #   - git                  → git checkout steps
+    #   - sonar                → SonarQube integration
+    #   - aws-credentials      → AWS credential binding
+    #   - ssh-slaves           → SSH agent node support
+    #   - credentials-binding  → withCredentials block
+    #   - ansicolor            → ANSI color output in console
+    #   - nodejs               → nodejs tool (Jenkins-Pipeline-Script/Jenkinsfile-Backend/Frontend)
+    #   - build-timeout        → timeout() step
+    #   - pipeline-stage-view  → Stage view UI in Jenkins
+    # ─────────────────────────────────────────────
+    - name: Install Jenkins Plugins via jenkins-plugin-cli
+      shell: |
+        jenkins-plugin-cli --plugins \
+          workflow-aggregator \
+          git \
+          sonar \
+          pipeline-stage-view \
+          workflow-job \
+          credentials-binding \
+          aws-credentials \
+          ssh-slaves \
+          plain-credentials \
+          ansicolor \
+          nodejs \
+          build-timeout \
+          blueocean \
+          github
+      become: yes
+      become_user: jenkins
+      register: plugin_install
+      changed_when: true
+      notify: Restart Jenkins
 
     - name: Create Jenkins Init Directory
       file:
@@ -101,7 +159,7 @@
              Secret.fromString("{{ sonar_token }}")
           )
           credentialsStore.addCredentials(domain, sonarToken)
-          
+
           // 3. Add GitHub Credentials (Username/Password)
           import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
           def githubCreds = new UsernamePasswordCredentialsImpl(
@@ -113,7 +171,7 @@
           )
           credentialsStore.addCredentials(domain, githubCreds)
 
-          // 4. Add GitHub Token (Secret Text)
+          // 4. Add GitHub Token (Secret Text) — used in Jenkinsfile git push
           def githubToken = new StringCredentialsImpl(
              CredentialsScope.GLOBAL,
              "github",
@@ -121,20 +179,8 @@
              Secret.fromString("{{ github_token }}")
           )
           credentialsStore.addCredentials(domain, githubToken)
-          
-          // 5. Add AWS Credentials
-          import com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl
-          def awsCreds = new AWSCredentialsImpl(
-            CredentialsScope.GLOBAL,
-            "aws_creds",
-            "AWS Access Keys",
-            "{{ aws_access_key }}",
-            "{{ aws_secret_key }}",
-            ""
-          )
-          credentialsStore.addCredentials(domain, awsCreds)
-          
-          // 6. Add AWS Account ID
+
+          // 5. Add AWS Account ID
           def accountId = new StringCredentialsImpl(
              CredentialsScope.GLOBAL,
              "AWS_ACCOUNT_ID",
@@ -142,44 +188,33 @@
              Secret.fromString("{{ aws_account_id }}")
           )
           credentialsStore.addCredentials(domain, accountId)
-          
-          // 7. Add ECR Repo Names
-          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_FRONTEND", "Frontend Repo", Secret.fromString("three-tier-frontend")))
-          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_BACKEND", "Backend Repo", Secret.fromString("three-tier-backend")))
 
+          // 6. Add ECR Repo Names (used by Jenkinsfile-Backend/Frontend)
+          // CRITICAL: These values MUST match the ECR repo names created by Terraform
+          // AND the image name in K8s-Manifests/Backend/deployment.yaml (backend:1)
+          // AND K8s-Manifests/Frontend/deployment.yaml (frontend:1)
+          // The Jenkins sed command: s/${ECR_REPO_NAME}:${oldTag}/${ECR_REPO_NAME}:${BUILD}/ only works
+          // if ECR_REPO_NAME appears verbatim in the image URL in deployment.yaml.
+          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_FRONTEND", "Frontend ECR Repo", Secret.fromString("frontend")))
+          credentialsStore.addCredentials(domain, new StringCredentialsImpl(CredentialsScope.GLOBAL, "ECR_REPO_BACKEND", "Backend ECR Repo", Secret.fromString("backend")))
 
-          // 8. Configure Agent Node (Infra Mgmt Server)
+          // 7. Configure Agent Node (Infra Mgmt Server)
           def agentName = "infra-mgmt"
-          def agentDesc = "Infrastructure Management Server"
+          def agentDesc = "Infrastructure Management Server (Jenkins Agent)"
           def agentPath = "/home/ubuntu/jenkins_agent"
           def agentIp = "{{ infra_mgmt_private_ip }}"
-          
-          // Check if node exists
+
           if (Jenkins.instance.getNode(agentName) == null) {
               def launcher = new SSHLauncher(
-                  agentIp, // Host
-                  22, // Port
-                  "infra-ssh-key", // Credentials ID
-                  (String)null, // JVM Options
-                  (String)null, // Java Path
-                  (String)null, // Prefix Start Slave Command
-                  (String)null, // Suffix Start Slave Command
-                  (Integer)null, // Launch Timeout
-                  (Integer)null, // Max Retries
-                  (Integer)null, // Retry Wait Time
-                  new NonVerifyingKeyVerificationStrategy() // Host Key Verification Strategy
+                  agentIp, 22, "infra-ssh-key",
+                  (String)null, (String)null, (String)null, (String)null,
+                  (Integer)null, (Integer)null, (Integer)null,
+                  new NonVerifyingKeyVerificationStrategy()
               )
-              
               DumbSlave agent = new DumbSlave(
-                  agentName,
-                  agentDesc,
-                  agentPath,
-                  "2", // # Executors
-                  Node.Mode.NORMAL,
-                  "infra-mgmt", // Labels
-                  launcher,
-                  new RetentionStrategy.Always(),
-                  new LinkedList()
+                  agentName, agentDesc, agentPath, "2",
+                  Node.Mode.NORMAL, "infra-mgmt", launcher,
+                  new RetentionStrategy.Always(), new LinkedList()
               )
               Jenkins.instance.addNode(agent)
               println "Agent ${agentName} created successfully"
@@ -189,11 +224,36 @@
         mode: '0755'
       notify: Restart Jenkins
 
-    - name: Install Jenkins Plugins
-      shell: |
-        java -jar /usr/share/jenkins/jenkins.war --plugin-cli --plugins \
-        workflow-aggregator git sonar pipeline-stage-view workflow-job blueocean dependency-check-jenkins-plugin credentials-binding aws-credentials ssh-slaves plain-credentials
-      ignore_errors: yes
+    # ─────────────────────────────────────────────
+    # SONARQUBE SERVER CONFIGURATION
+    # Groovy script that registers SonarQube server in Jenkins
+    # so withSonarQubeEnv('sonar-server') in Jenkinsfiles works.
+    # Name 'sonar-server' MUST match what Jenkinsfile-Backend/Frontend use.
+    # ─────────────────────────────────────────────
+    - name: Configure SonarQube Server in Jenkins
+      copy:
+        dest: /var/lib/jenkins/init.groovy.d/03-sonar-server.groovy
+        content: |
+          #!groovy
+          import jenkins.model.*
+          import hudson.plugins.sonar.*
+          import hudson.plugins.sonar.model.*
+
+          def instance = Jenkins.getInstance()
+          def sonarDesc = instance.getDescriptor(SonarGlobalConfiguration.class)
+
+          def sonarInstallation = new SonarInstallation(
+            "sonar-server",
+            "http://{{ infra_mgmt_private_ip }}:9000",
+            "sonar-token",
+            null, null, null, null, null
+          )
+          sonarDesc.setInstallations(sonarInstallation)
+          sonarDesc.save()
+          println "SonarQube server 'sonar-server' configured at http://{{ infra_mgmt_private_ip }}:9000"
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
       notify: Restart Jenkins
 
   handlers:
@@ -201,3 +261,12 @@
       service:
         name: jenkins
         state: restarted
+      listen: Restart Jenkins
+
+    - name: Wait for Jenkins after restart
+      wait_for:
+        port: 8080
+        delay: 20
+        timeout: 120
+        state: started
+      listen: Restart Jenkins

@@ -1,94 +1,236 @@
 ---
-- name: Configure Infra Monitoring & Management Server
+# ═══════════════════════════════════════════════════════════════════════
+# PLAYBOOK: Configure Infra Management Server (Jenkins Agent)
+#
+# PURPOSE: Install and configure all DevSecOps tools on the infra-mgmt
+#          server. This server acts as the Jenkins Agent and runs all
+#          pipeline jobs (Terraform, Ansible, SonarQube scanning, Trivy).
+#
+# TOOLS INSTALLED:
+#   - Terraform     (IaC provisioning runs here via Jenkins agent)
+#   - Ansible       (Config management runs here via Jenkins agent)
+#   - Docker        (Required for SonarQube container + image builds)
+#   - SonarQube     (Runs as Docker container on port 9000)
+#   - Trivy         (Security vulnerability scanner)
+#   - AWS CLI       (ECR/EKS operations)
+#   - Java 17       (Required for Jenkins agent JAR)
+#
+# RUNS FROM: infra-mgmt-server itself (after SSH from Ansible controller)
+# EXECUTED VIA: Jenkinsfile.infra pipeline (Stage: Ansible Configuration)
+# ═══════════════════════════════════════════════════════════════════════
+- name: Configure Infra Management Server (Jenkins Agent)
   hosts: infra_mgmt
   become: true
   vars_files:
     - group_vars/all.yml
 
   tasks:
+    # ─────────────────────────────────────────────
+    # BASE SYSTEM SETUP
+    # ─────────────────────────────────────────────
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
-        
+
     - name: Install Common Utilities
       apt:
-        name: [wget, curl, unzip, git, software-properties-common, gnupg, lsb-release, python3-pip]
+        name:
+          - wget
+          - curl
+          - unzip
+          - git
+          - software-properties-common
+          - gnupg
+          - lsb-release
+          - python3-pip
+          - apt-transport-https
+          - ca-certificates
         state: present
-        
-    # --- Terraform ---
+
+    # ─────────────────────────────────────────────
+    # JAVA 17 (Required for Jenkins Agent JAR)
+    # Jenkins master connects to this agent via SSH
+    # and launches agent.jar — Java must be present
+    # ─────────────────────────────────────────────
+    - name: Install Java 17 (for Jenkins Agent)
+      apt:
+        name: openjdk-17-jre
+        state: present
+        update_cache: yes
+
+    # ─────────────────────────────────────────────
+    # TERRAFORM
+    # Why here: Jenkins pipelines run Terraform FROM
+    # this agent server (label: infra-mgmt)
+    # ─────────────────────────────────────────────
     - name: Add HashiCorp GPG Key
       shell: |
-        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
       args:
         creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
 
-    - name: Add HashiCorp Repo
-      shell: |
-        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list
-      args:
-        creates: /etc/apt/sources.list.d/hashicorp.list
+    - name: Add HashiCorp Apt Repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+        state: present
+        filename: hashicorp
 
     - name: Install Terraform
       apt:
         name: terraform
         state: present
         update_cache: yes
-        
-    # --- Ansible ---
-    - name: Add Ansible PPA
+
+    # ─────────────────────────────────────────────
+    # ANSIBLE
+    # Why here: Jenkins pipelines also run Ansible
+    # playbooks FROM this agent server
+    #
+    # FIX: Using pipx/pip3 method instead of PPA
+    # because ppa:ansible/ansible is unreliable on
+    # Ubuntu 22.04 (jammy) and requires add-apt-repository
+    # which has dependency issues in non-interactive mode.
+    # ─────────────────────────────────────────────
+    - name: Install Ansible via pip3 (reliable on Ubuntu 22.04)
+      pip:
+        name:
+          - ansible
+          - boto3
+          - botocore
+        executable: pip3
+        extra_args: --break-system-packages
+
+    - name: Install required Ansible collections
+      # community.docker: needed for docker_container tasks
+      # amazon.aws:       needed for any AWS module tasks
+      # community.general: needed for various general modules
+      shell: |
+        ansible-galaxy collection install community.docker amazon.aws community.general --upgrade
+      become: false
+      args:
+        executable: /bin/bash
+
+    # ─────────────────────────────────────────────
+    # AWS CLI v2
+    # Required for ECR login, EKS kubeconfig, etc.
+    # ─────────────────────────────────────────────
+    - name: Download AWS CLI v2 installer
+      unarchive:
+        src: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+        dest: "/tmp"
+        remote_src: yes
+      args:
+        creates: /tmp/aws/install
+
+    - name: Install AWS CLI v2
+      command: /tmp/aws/install --update
+      register: aws_install
+      changed_when: "'You can now run' in aws_install.stdout"
+
+    # ─────────────────────────────────────────────
+    # DOCKER
+    # Required for:
+    #   - Running SonarQube as a container
+    #   - Building Docker images in CI/CD pipelines
+    # ─────────────────────────────────────────────
+    - name: Add Docker GPG Key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/docker-archive-keyring.gpg
+
+    - name: Add Docker Apt Repository
       apt_repository:
-        repo: ppa:ansible/ansible
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
+        filename: docker
 
-    - name: Install Ansible
+    - name: Install Docker CE
       apt:
-        name: ansible
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
         state: present
+        update_cache: yes
 
-    # --- Docker (for SonarQube) ---
-    - name: Install Docker
-      apt:
-        name: docker.io
-        state: present
-
-    - name: Start Docker
+    - name: Start and Enable Docker Service
       service:
         name: docker
         state: started
         enabled: yes
-        
-    - name: Add User to Docker Group
+
+    - name: Add ubuntu user to Docker Group
       user:
         name: ubuntu
         groups: docker
         append: yes
 
-    - name: Ensure Docker Socket Permissions
+    - name: Ensure Docker Socket has correct permissions
       file:
         path: /var/run/docker.sock
-        mode: '0777'
+        mode: '0666'
 
-    # --- SonarQube (Container) ---
+    # ─────────────────────────────────────────────
+    # SONARQUBE (Docker Container)
+    # Why container: Avoids complex manual install.
+    # Runs on port 9000 of this server.
+    # Production note: SonarQube requires vm.max_map_count
+    # to be set or it will crash on startup.
+    # ─────────────────────────────────────────────
+    - name: Set vm.max_map_count for SonarQube (Elasticsearch requirement)
+      sysctl:
+        name: vm.max_map_count
+        value: "262144"
+        state: present
+        reload: yes
+
     - name: Run SonarQube Container
-      docker_container:
+      community.docker.docker_container:
         name: sonar
         image: sonarqube:lts-community
         ports:
           - "9000:9000"
+        env:
+          SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
         state: started
-        restart_policy: always
+        restart_policy: unless-stopped
 
-    # --- Trivy ---
-    - name: Add Trivy Repo
+    # ─────────────────────────────────────────────
+    # TRIVY (Security Scanner)
+    # Scans both filesystem and Docker images
+    # for CVEs during CI/CD pipeline runs
+    # ─────────────────────────────────────────────
+    - name: Add Trivy GPG Key
       shell: |
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
-        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | tee -a /etc/apt/sources.list.d/trivy.list
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy-keyring.gpg
       args:
-        creates: /etc/apt/sources.list.d/trivy.list
+        creates: /usr/share/keyrings/trivy-keyring.gpg
+
+    - name: Add Trivy Apt Repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/trivy-keyring.gpg] https://aquasecurity.github.io/trivy-repo/deb {{ ansible_distribution_release }} main"
+        state: present
+        filename: trivy
 
     - name: Install Trivy
       apt:
         name: trivy
         state: present
         update_cache: yes
+
+    # ─────────────────────────────────────────────
+    # JENKINS AGENT WORKSPACE DIRECTORY
+    # Jenkins master connects here via SSH and uses
+    # this directory as the agent root path
+    # ─────────────────────────────────────────────
+    - name: Create Jenkins Agent workspace directory
+      file:
+        path: /home/ubuntu/jenkins_agent
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'

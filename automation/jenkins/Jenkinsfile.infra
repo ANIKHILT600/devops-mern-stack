@@ -26,12 +26,13 @@ pipeline {
     }
 
     environment {
-        AWS_ACCESS_KEY_ID = credentials('aws_creds')
-        AWS_SECRET_ACCESS_KEY = credentials('aws_creds')
-        AWS_DEFAULT_REGION = "${params.AWS_REGION}"
-        SONAR_TOKEN = credentials('sonar-token')
-        GITHUB_TOKEN = credentials('github')
-        TF_IN_AUTOMATION = 'true'
+        // IAM Role on infra-mgmt-server handles AWS auth automatically.
+        // No static AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY needed.
+        AWS_DEFAULT_REGION    = "${params.AWS_REGION}"
+        SONAR_TOKEN           = credentials('sonar-token')
+        GITHUB_TOKEN          = credentials('github')
+        AWS_ACCOUNT_ID        = credentials('AWS_ACCOUNT_ID')
+        TF_IN_AUTOMATION      = 'true'
     }
 
     stages {
@@ -222,12 +223,13 @@ pipeline {
                         // 2. Configure Jenkins Server
                         echo "  → Configuring Jenkins Server..."
                         sh """
-                            ansible-playbook -i inventory.ini jenkins.yml \
-                            --extra-vars "sonar_token=${SONAR_TOKEN} \
-                                          github_token=${GITHUB_TOKEN} \
-                                          aws_access_key=${AWS_ACCESS_KEY_ID} \
-                                          aws_secret_key=${AWS_SECRET_ACCESS_KEY} \
-                                          aws_account_id=${awsAccountId}" -v
+                            ansible-playbook -i inventory.ini jenkins.yml \\
+                            --extra-vars "sonar_token=${SONAR_TOKEN} \\
+                                          github_token=${GITHUB_TOKEN} \\
+                                          github_username=ANIKHILT600 \\
+                                          aws_account_id=${AWS_ACCOUNT_ID} \\
+                                          aws_access_key=NOT_NEEDED_IAM_ROLE \\
+                                          aws_secret_key=NOT_NEEDED_IAM_ROLE" -v
                         """
                         
                         // 3. Configure Jump Server
