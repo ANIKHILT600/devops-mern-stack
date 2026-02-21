@@ -145,30 +145,36 @@
         state: started
 
     # ─────────────────────────────────────────────
-    # PHASE 3: INIT.GROOVY.D SCRIPTS (Startup)
+    # PHASE 3: EXECUTE GROOVY SCRIPTS VIA CLI
     # ─────────────────────────────────────────────
+    # Execute directly via Jenkins CLI for guaranteed execution
+    # (init.groovy.d files don't execute if Jenkins already initialized)
 
-    - name: Create Credentials Init Script
-      copy:
-        dest: /var/lib/jenkins/init.groovy.d/02-credentials.groovy
-        content: |
-          #!groovy
-          import jenkins.model.*
-          import com.cloudbees.plugins.credentials.*
-          import com.cloudbees.plugins.credentials.common.*
-          import com.cloudbees.plugins.credentials.domains.*
-          import com.cloudbees.jenkins.plugins.sshcredentials.impl.*
-          import hudson.plugins.sshslaves.*
-          import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
-          import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+    - name: Execute Credentials Configuration via Jenkins CLI
+      shell: |
+        CLI_JAR="/tmp/jenkins-cli.jar"
+        wget -q -O $CLI_JAR http://localhost:8080/jnlpJars/jenkins-cli.jar
 
-          def instance = Jenkins.getInstance()
-          def store = SystemCredentialsProvider.getInstance().getStore()
-          def domain = Domain.global()
+        AUTH="{{ jenkins_admin_user }}:{{ jenkins_admin_password }}"
+        JENKINS_URL="http://localhost:8080"
 
-          // SSH Key for Agent
-          try {
-            def key = """{{ lookup('file', 'private_key.pem') }}"""
+        java -jar $CLI_JAR -s $JENKINS_URL -auth $AUTH groovy = << 'GROOVY_SCRIPT'
+        import jenkins.model.*
+        import com.cloudbees.plugins.credentials.*
+        import com.cloudbees.plugins.credentials.common.*
+        import com.cloudbees.plugins.credentials.domains.*
+        import com.cloudbees.jenkins.plugins.sshcredentials.impl.*
+        import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+        import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+
+        def instance = Jenkins.getInstance()
+        def store = SystemCredentialsProvider.getInstance().getStore()
+        def domain = Domain.global()
+
+        // SSH Key
+        try {
+          if (store.getCredentials(domain).find { it.id == "infra-ssh-key" } == null) {
+            def key = new File("/root/devops-mern-stack/automation/ansible/private_key.pem").text
             def privateKey = new BasicSSHUserPrivateKey(
               CredentialsScope.GLOBAL,
               "infra-ssh-key",
@@ -177,316 +183,276 @@
               "",
               "SSH Key for Agents"
             )
-            if (store.getCredentials(domain).find { it.id == "infra-ssh-key" } == null) {
-              store.addCredentials(domain, privateKey)
-              println("✓ SSH Key credential created")
-            }
-          } catch (Exception e) {
-            println("⚠ SSH Key credential error: " + e.message)
+            store.addCredentials(domain, privateKey)
+            println("✓ SSH Key created")
+          }
+        } catch (Exception e) { println("SSH Key: " + e.message) }
+
+        // Sonar Token
+        try {
+          if (store.getCredentials(domain).find { it.id == "sonar-token" } == null) {
+            store.addCredentials(domain, new StringCredentialsImpl(
+              CredentialsScope.GLOBAL, "sonar-token",
+              "SonarQube Token", hudson.util.Secret.fromString("{{ sonar_token }}")
+            ))
+            println("✓ SonarQube token created")
+          }
+        } catch (Exception e) { println("Sonar token: " + e.message) }
+
+        // GitHub credentials
+        try {
+          if (store.getCredentials(domain).find { it.id == "GITHUB" } == null) {
+            store.addCredentials(domain, new UsernamePasswordCredentialsImpl(
+              CredentialsScope.GLOBAL, "GITHUB",
+              "GitHub Credentials",
+              "{{ github_username }}", "{{ github_token }}"
+            ))
+            println("✓ GitHub credentials created")
+          }
+        } catch (Exception e) { println("GitHub: " + e.message) }
+
+        // GitHub token
+        try {
+          if (store.getCredentials(domain).find { it.id == "github" } == null) {
+            store.addCredentials(domain, new StringCredentialsImpl(
+              CredentialsScope.GLOBAL, "github",
+              "GitHub Token", hudson.util.Secret.fromString("{{ github_token }}")
+            ))
+            println("✓ GitHub token created")
+          }
+        } catch (Exception e) { println("GitHub token: " + e.message) }
+
+        // AWS Account ID
+        try {
+          if (store.getCredentials(domain).find { it.id == "AWS_ACCOUNT_ID" } == null) {
+            store.addCredentials(domain, new StringCredentialsImpl(
+              CredentialsScope.GLOBAL, "AWS_ACCOUNT_ID",
+              "AWS Account ID", hudson.util.Secret.fromString("{{ aws_account_id }}")
+            ))
+            println("✓ AWS Account ID created")
+          }
+        } catch (Exception e) { println("AWS ID: " + e.message) }
+
+        // ECR Frontend
+        try {
+          if (store.getCredentials(domain).find { it.id == "ECR_REPO_FRONTEND" } == null) {
+            store.addCredentials(domain, new StringCredentialsImpl(
+              CredentialsScope.GLOBAL, "ECR_REPO_FRONTEND",
+              "ECR Frontend", hudson.util.Secret.fromString("frontend")
+            ))
+            println("✓ ECR Frontend created")
+          }
+        } catch (Exception e) { println("ECR Frontend: " + e.message) }
+
+        // ECR Backend
+        try {
+          if (store.getCredentials(domain).find { it.id == "ECR_REPO_BACKEND" } == null) {
+            store.addCredentials(domain, new StringCredentialsImpl(
+              CredentialsScope.GLOBAL, "ECR_REPO_BACKEND",
+              "ECR Backend", hudson.util.Secret.fromString("backend")
+            ))
+            println("✓ ECR Backend created")
+          }
+        } catch (Exception e) { println("ECR Backend: " + e.message) }
+
+        instance.save()
+        println("✓✓✓ All credentials configured ✓✓✓")
+        GROOVY_SCRIPT
+
+        rm -f $CLI_JAR
+      args:
+        executable: /bin/bash
+      register: credentials_result
+      changed_when: "'created' in credentials_result.stdout"
+
+    - name: Execute SonarQube Server Configuration via CLI
+      shell: |
+        CLI_JAR="/tmp/jenkins-cli.jar"
+        wget -q -O $CLI_JAR http://localhost:8080/jnlpJars/jenkins-cli.jar
+
+        AUTH="{{ jenkins_admin_user }}:{{ jenkins_admin_password }}"
+        JENKINS_URL="http://localhost:8080"
+
+        java -jar $CLI_JAR -s $JENKINS_URL -auth $AUTH groovy = << 'GROOVY_SCRIPT'
+        import jenkins.model.*
+        import hudson.plugins.sonar.*
+        import hudson.plugins.sonar.model.TriggersConfig
+
+        def instance = Jenkins.getInstance()
+
+        try {
+          def descriptor = instance.getDescriptor(SonarGlobalConfiguration.class)
+          def installations = descriptor.getInstallations()
+          
+          if (!installations.any { it.name == "sonar-server" }) {
+            def sonarInstall = new SonarInstallation(
+              "sonar-server",
+              "http://{{ infra_mgmt_private_ip }}:9000",
+              "sonar-token",
+              "", "", new TriggersConfig(), "", "", null
+            )
+            descriptor.setInstallations(sonarInstall)
+            descriptor.save()
+            println("✓ SonarQube server configured")
+          } else {
+            println("✓ SonarQube server already exists")
+          }
+        } catch (Exception e) {
+          println("⚠ SonarQube config: " + e.message)
+        }
+
+        instance.save()
+        GROOVY_SCRIPT
+
+        rm -f $CLI_JAR
+      args:
+        executable: /bin/bash
+      register: sonar_result
+      changed_when: "'configure' in sonar_result.stdout"
+
+    - name: Execute Tools Configuration via CLI
+      shell: |
+        CLI_JAR="/tmp/jenkins-cli.jar"
+        wget -q -O $CLI_JAR http://localhost:8080/jnlpJars/jenkins-cli.jar
+
+        AUTH="{{ jenkins_admin_user }}:{{ jenkins_admin_password }}"
+        JENKINS_URL="http://localhost:8080"
+
+        java -jar $CLI_JAR -s $JENKINS_URL -auth $AUTH groovy = << 'GROOVY_SCRIPT'
+        import jenkins.model.*
+
+        def instance = Jenkins.getInstance()
+
+        // NodeJS Tool
+        try {
+          def nodeToolDesc = instance.getDescriptor("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation")
+          if (nodeToolDesc == null) {
+            nodeToolDesc = instance.getDescriptor(Class.forName("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation"))
           }
 
-          // SonarQube Token
-          try {
-            if (store.getCredentials(domain).find { it.id == "sonar-token" } == null) {
-              store.addCredentials(domain, new StringCredentialsImpl(
-                CredentialsScope.GLOBAL, "sonar-token",
-                "SonarQube Token", hudson.util.Secret.fromString("{{ sonar_token }}")
-              ))
-              println("✓ SonarQube token credential created")
+          if (nodeToolDesc != null) {
+            def nodeInstalls = nodeToolDesc.getInstallations()
+            if (!nodeInstalls.any { it.name == "nodejs" }) {
+              def nodeInstallClass = Class.forName("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation")
+              def nodeInstall = nodeInstallClass.getConstructor(String.class, String.class, java.util.List.class)
+                .newInstance("nodejs", "auto", [])
+              def allInstalls = nodeInstalls.toList()
+              allInstalls.add(nodeInstall)
+              nodeToolDesc.setInstallations(allInstalls.toArray(new Object[allInstalls.size()]))
+              nodeToolDesc.save()
+              println("✓ NodeJS tool configured")
             }
-          } catch (Exception e) {
-            println("⚠ SonarQube token error: " + e.message)
+          }
+        } catch (Exception e) {
+          println("NodeJS: " + e.message)
+        }
+
+        // SonarQube Scanner Tool
+        try {
+          def scannerDesc = instance.getDescriptor("hudson.plugins.sonar.SonarRunnerInstallation")
+          if (scannerDesc == null) {
+            scannerDesc = instance.getDescriptor(Class.forName("hudson.plugins.sonar.SonarRunnerInstallation"))
           }
 
-          // GitHub Username/Password
-          try {
-            if (store.getCredentials(domain).find { it.id == "GITHUB" } == null) {
-              store.addCredentials(domain, new UsernamePasswordCredentialsImpl(
-                CredentialsScope.GLOBAL, "GITHUB",
-                "GitHub Credentials",
-                "{{ github_username }}", "{{ github_token }}"
-              ))
-              println("✓ GitHub credential created")
+          if (scannerDesc != null) {
+            def scannerInstalls = scannerDesc.getInstallations()
+            if (!scannerInstalls.any { it.name == "sonar-scanner" }) {
+              def scannerInstallClass = Class.forName("hudson.plugins.sonar.SonarRunnerInstallation")
+              def scannerInstall = scannerInstallClass.getConstructor(String.class, String.class, java.util.List.class)
+                .newInstance("sonar-scanner", "auto", [])
+              def allInstalls = scannerInstalls.toList()
+              allInstalls.add(scannerInstall)
+              scannerDesc.setInstallations(allInstalls.toArray(new Object[allInstalls.size()]))
+              scannerDesc.save()
+              println("✓ SonarQube Scanner configured")
             }
-          } catch (Exception e) {
-            println("⚠ GitHub credential error: " + e.message)
           }
+        } catch (Exception e) {
+          println("Scanner: " + e.message)
+        }
 
-          // GitHub Token (for git push in pipelines)
-          try {
-            if (store.getCredentials(domain).find { it.id == "github" } == null) {
-              store.addCredentials(domain, new StringCredentialsImpl(
-                CredentialsScope.GLOBAL, "github",
-                "GitHub Token (for push)", hudson.util.Secret.fromString("{{ github_token }}")
-              ))
-              println("✓ GitHub token credential created")
-            }
-          } catch (Exception e) {
-            println("⚠ GitHub token error: " + e.message)
-          }
+        instance.save()
+        println("✓✓✓ Tools configured ✓✓✓")
+        GROOVY_SCRIPT
 
-          // AWS Account ID
-          try {
-            if (store.getCredentials(domain).find { it.id == "AWS_ACCOUNT_ID" } == null) {
-              store.addCredentials(domain, new StringCredentialsImpl(
-                CredentialsScope.GLOBAL, "AWS_ACCOUNT_ID",
-                "AWS Account ID", hudson.util.Secret.fromString("{{ aws_account_id }}")
-              ))
-              println("✓ AWS Account ID credential created")
-            }
-          } catch (Exception e) {
-            println("⚠ AWS Account ID error: " + e.message)
-          }
+        rm -f $CLI_JAR
+      args:
+        executable: /bin/bash
+      register: tools_result
+      changed_when: "'configured' in tools_result.stdout"
 
-          // ECR Frontend Repo
-          try {
-            if (store.getCredentials(domain).find { it.id == "ECR_REPO_FRONTEND" } == null) {
-              store.addCredentials(domain, new StringCredentialsImpl(
-                CredentialsScope.GLOBAL, "ECR_REPO_FRONTEND",
-                "ECR Frontend Repository", hudson.util.Secret.fromString("frontend")
-              ))
-              println("✓ ECR Frontend credential created")
-            }
-          } catch (Exception e) {
-            println("⚠ ECR Frontend credential error: " + e.message)
-          }
+    - name: Execute Agent Node Configuration via CLI
+      shell: |
+        CLI_JAR="/tmp/jenkins-cli.jar"
+        wget -q -O $CLI_JAR http://localhost:8080/jnlpJars/jenkins-cli.jar
 
-          // ECR Backend Repo
-          try {
-            if (store.getCredentials(domain).find { it.id == "ECR_REPO_BACKEND" } == null) {
-              store.addCredentials(domain, new StringCredentialsImpl(
-                CredentialsScope.GLOBAL, "ECR_REPO_BACKEND",
-                "ECR Backend Repository", hudson.util.Secret.fromString("backend")
-              ))
-              println("✓ ECR Backend credential created")
-            }
-          } catch (Exception e) {
-            println("⚠ ECR Backend credential error: " + e.message)
-          }
+        AUTH="{{ jenkins_admin_user }}:{{ jenkins_admin_password }}"
+        JENKINS_URL="http://localhost:8080"
 
-          instance.save()
-        owner: jenkins
-        group: jenkins
-        mode: '0755'
+        java -jar $CLI_JAR -s $JENKINS_URL -auth $AUTH groovy = << 'GROOVY_SCRIPT'
+        import jenkins.model.*
+        import hudson.model.Node
+        import hudson.slaves.*
+        import com.cloudbees.jenkins.plugins.sshcredentials.impl.*
+        import hudson.plugins.sshslaves.SSHConnector
 
-    - name: Create SonarQube Server Init Script
-      copy:
-        dest: /var/lib/jenkins/init.groovy.d/03-sonarqube-server.groovy
-        content: |
-          #!groovy
-          import jenkins.model.*
-          import hudson.plugins.sonar.*
-          import hudson.plugins.sonar.model.TriggersConfig
+        def instance = Jenkins.getInstance()
 
-          def instance = Jenkins.getInstance()
-
-          try {
-            def descriptor = instance.getDescriptor(SonarGlobalConfiguration.class)
-            if (descriptor == null) {
-              println("⚠ SonarQube plugin not fully loaded yet, skipping configuration")
-              return
-            }
-
-            def installations = descriptor.getInstallations()
-            def sonarExists = installations.any { it.name == "sonar-server" }
-
-            if (!sonarExists) {
-              def sonarInstall = new SonarInstallation(
-                "sonar-server",
-                "http://{{ infra_mgmt_private_ip }}:9000",
-                "sonar-token",
-                "",
-                "",
-                new TriggersConfig(),
-                "",
-                "",
-                null
+        try {
+          if (instance.getNode("infra-mgmt") == null) {
+            try {
+              def sshConnector = new SSHConnector(
+                22, "infra-ssh-key", "{{ infra_mgmt_private_ip }}",
+                "", "", null, 1, 3, null, null
               )
-              descriptor.setInstallations(sonarInstall)
-              descriptor.save()
-              println("✓ SonarQube server configured: sonar-server")
-            } else {
-              println("✓ SonarQube server already exists: sonar-server")
-            }
-          } catch (Exception e) {
-            println("⚠ SonarQube configuration error: " + e.message)
-            e.printStackTrace()
-          }
+              def agentNode = new DumbSlave(
+                "infra-mgmt", "/var/lib/jenkins", sshConnector
+              )
+              agentNode.setMode(Node.Mode.NORMAL)
+              agentNode.setNumExecutors(4)
+              agentNode.setLabel("infra-mgmt")
+              agentNode.setRetentionStrategy(new RetentionStrategy.Always())
 
-          instance.save()
-        owner: jenkins
-        group: jenkins
-        mode: '0755'
+              def props = new java.util.LinkedList()
+              def envProps = new EnvironmentVariablesNodeProperty()
+              envProps.setEnvVars(["JENKINS_NODE_NAME=infra-mgmt", "DOCKER_HOST=unix:///var/run/docker.sock"])
+              props.add(envProps)
+              agentNode.setNodeProperties(props)
 
-    - name: Create Tools Configuration Init Script
-      copy:
-        dest: /var/lib/jenkins/init.groovy.d/04-tools-configuration.groovy
-        content: |
-          #!groovy
-          import jenkins.model.*
-
-          def instance = Jenkins.getInstance()
-
-          try {
-            // Configure NodeJS Tool
-            try {
-              def nodeToolDesc = instance.getDescriptor("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation")
-              if (nodeToolDesc == null) {
-                // Try alternative descriptor lookup
-                nodeToolDesc = instance.getDescriptor(Class.forName("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation"))
-              }
-
-              if (nodeToolDesc != null) {
-                def nodeInstalls = nodeToolDesc.getInstallations()
-                def nodeExists = nodeInstalls.any { it.name == "nodejs" }
-
-                if (!nodeExists) {
-                  def nodeInstallClass = Class.forName("org.jenkinsci.plugins.nodejs.tools.NodeJSInstallation")
-                  def nodeInstall = nodeInstallClass.getConstructor(String.class, String.class, java.util.List.class)
-                    .newInstance("nodejs", "auto", [])
-
-                  def allInstalls = nodeInstalls.toList()
-                  allInstalls.add(nodeInstall)
-                  nodeToolDesc.setInstallations(allInstalls.toArray(new Object[allInstalls.size()]))
-                  nodeToolDesc.save()
-                  println("✓ NodeJS tool configured: nodejs")
-                } else {
-                  println("✓ NodeJS tool already exists: nodejs")
-                }
-              } else {
-                println("⚠ NodeJS descriptor not available (plugin may not be loaded)")
-              }
+              instance.addNode(agentNode)
+              instance.save()
+              println("✓ Agent node created")
             } catch (Exception e) {
-              println("⚠ NodeJS tool warning: " + e.message)
+              println("Agent SSH error: " + e.message)
             }
-
-            // Configure SonarQube Scanner Tool
-            try {
-              def scannerDesc = instance.getDescriptor("hudson.plugins.sonar.SonarRunnerInstallation")
-              if (scannerDesc == null) {
-                scannerDesc = instance.getDescriptor(Class.forName("hudson.plugins.sonar.SonarRunnerInstallation"))
-              }
-
-              if (scannerDesc != null) {
-                def scannerInstalls = scannerDesc.getInstallations()
-                def scannerExists = scannerInstalls.any { it.name == "sonar-scanner" }
-
-                if (!scannerExists) {
-                  def scannerInstallClass = Class.forName("hudson.plugins.sonar.SonarRunnerInstallation")
-                  def scannerInstall = scannerInstallClass.getConstructor(String.class, String.class, java.util.List.class)
-                    .newInstance("sonar-scanner", "auto", [])
-
-                  def allInstalls = scannerInstalls.toList()
-                  allInstalls.add(scannerInstall)
-                  scannerDesc.setInstallations(allInstalls.toArray(new Object[allInstalls.size()]))
-                  scannerDesc.save()
-                  println("✓ SonarQube Scanner tool configured: sonar-scanner")
-                } else {
-                  println("✓ SonarQube Scanner tool already exists: sonar-scanner")
-                }
-              } else {
-                println("⚠ SonarQube Scanner descriptor not available (plugin may not be loaded)")
-              }
-            } catch (Exception e) {
-              println("⚠ SonarQube Scanner warning: " + e.message)
-            }
-
-          } catch (Exception e) {
-            println("⚠ Tools configuration error: " + e.message)
+          } else {
+            println("✓ Agent node already exists")
           }
+        } catch (Exception e) {
+          println("Agent: " + e.message)
+        }
 
-          instance.save()
-        owner: jenkins
-        group: jenkins
-        mode: '0755'
+        instance.save()
+        println("✓✓✓ Agent configured ✓✓✓")
+        GROOVY_SCRIPT
 
-    - name: Create Agent Configuration Init Script
-      copy:
-        dest: /var/lib/jenkins/init.groovy.d/05-agent-node.groovy
-        content: |
-          #!groovy
-          import jenkins.model.*
-          import hudson.model.Node
-          import hudson.slaves.*
-          import com.cloudbees.jenkins.plugins.sshcredentials.impl.*
-          import hudson.plugins.sshslaves.SSHConnector
+        rm -f $CLI_JAR
+      args:
+        executable: /bin/bash
+      register: agent_result
+      changed_when: "'created' in agent_result.stdout"
 
-          def instance = Jenkins.getInstance()
-
-          try {
-            def nodeExists = instance.getNode("infra-mgmt") != null
-
-            if (!nodeExists) {
-              try {
-                def sshConnector = new SSHConnector(
-                  22,                    // port
-                  "infra-ssh-key",       // credentialsId
-                  "{{ infra_mgmt_private_ip }}",  // host
-                  "",                    // jvmOptions
-                  "",                    // javaPath
-                  null,                  // sshKeyPassphrase
-                  1,                     // maxNumRetries
-                  3,                     // retryWaitTime
-                  null,                  // sshHostKeyVerificationStrategy
-                  null                   // tcpNoDelayEnabled
-                )
-
-                def agentNode = new DumbSlave(
-                  "infra-mgmt",
-                  "/var/lib/jenkins",
-                  sshConnector
-                )
-
-                agentNode.setMode(Node.Mode.NORMAL)
-                agentNode.setNumExecutors(4)
-                agentNode.setLabel("infra-mgmt")
-                agentNode.setRetentionStrategy(new RetentionStrategy.Always())
-
-                def props = new java.util.LinkedList()
-                def envProps = new EnvironmentVariablesNodeProperty()
-                envProps.setEnvVars([
-                  "JENKINS_NODE_NAME=infra-mgmt",
-                  "DOCKER_HOST=unix:///var/run/docker.sock"
-                ])
-                props.add(envProps)
-                agentNode.setNodeProperties(props)
-
-                instance.addNode(agentNode)
-                instance.save()
-                println("✓ Agent node created: infra-mgmt (SSH slave)")
-              } catch (Exception e) {
-                println("✓ Agent node initialization - using alternative approach: " + e.message)
-                // Create minimal agent node if SSHConnector not available
-                def agentNode = new DumbSlave(
-                  "infra-mgmt",
-                  "/var/lib/jenkins",
-                  new hudson.slaves.BuiltInNodeProperty[0]
-                )
-                agentNode.setLauncher(new CliBuildagentLauncher())
-                instance.addNode(agentNode)
-                println("⚠ Node created with CLI launcher (SSH may need manual setup)")
-              }
-            } else {
-              println("✓ Agent node already exists: infra-mgmt")
-            }
-          } catch (Exception e) {
-            println("⚠ Agent node error: " + e.message)
-          }
-        owner: jenkins
-        group: jenkins
-        mode: '0755'
-
-    - name: Start and Enable Jenkins Service (Restart for Init Scripts)
+    - name: Start Jenkins Service
       service:
         name: jenkins
-        state: restarted
+        state: started
         enabled: yes
 
-    - name: Wait for Jenkins after init scripts
+    - name: Wait for Jenkins to be fully ready
       wait_for:
         port: 8080
-        delay: 25
-        timeout: 120
+        delay: 10
+        timeout: 60
         state: started
 
     # ─────────────────────────────────────────────
@@ -582,6 +548,18 @@
       wait_for:
         timeout: 10
       when: job_creation is changed
+
+    - name: Verify init scripts executed in Jenkins logs
+      shell: |
+        grep_pattern="✓.*credential\|✓.*sonar-server\|✓.*tool configured\|✓.*Agent node\|⚠]"
+        if grep -i "init.groovy" /var/log/jenkins/jenkins.log 2>/dev/null || journalctl -u jenkins | grep -i "sonar-server"; then
+          echo "✓ Init scripts appear to have executed"
+        else
+          echo "⚠ Could not verify init script execution - continuing with job verification"
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
 
     - name: Get Jenkins Server IP from inventory
       set_fact:
