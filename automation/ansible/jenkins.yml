@@ -583,6 +583,11 @@
         timeout: 10
       when: job_creation is changed
 
+    - name: Get Jenkins Server IP from inventory
+      set_fact:
+        captured_jenkins_ip: "{{ hostvars[groups['jenkins_server'][0]]['ansible_host'] | default('unknown') }}"
+      when: groups['jenkins_server'] is defined and groups['jenkins_server'] | length > 0
+
     - name: Print Jenkins Configuration Summary
       debug:
         msg: |
@@ -616,14 +621,30 @@
           ║  ✓ DevSecOps-Master         (Master orchestrator)                      ║
           ║                                                                        ║
           ║ ACCESS JENKINS:                                                        ║
-          ║  URL:      http://{{ jenkins_server_ip }}:8080                         ║
+          ║  URL:      http://{{ captured_jenkins_ip | default('jenkins-ip') }}:8080          ║
           ║  Username: {{ jenkins_admin_user }}                                     ║
           ║  Password: (change after first login)                                  ║
+          ║  📌 If IP shows 'jenkins-ip': Check terraform outputs                  ║
+          ║                                                                        ║
+          ║ SONARQUBE ACCESS:                                                      ║
+          ║  URL:      http://{{ infra_mgmt_private_ip }}:9000                      ║
+          ║             (or via SSH tunnel if in separate VPC)                     ║
+          ║  Username: admin (default)                                             ║
+          ║  Password: (changed during setup)                                      ║
+          ║                                                                        ║
+          ║ VERIFICATION CHECKLIST:                                                ║
+          ║  □ Jenkins UI accessible at http://jenkins-ip:8080                    ║
+          ║  □ Log in with admin / password                                        ║
+          ║  □ Verify 7 credentials in Manage Jenkins → Credentials               ║
+          ║  □ Verify SonarQube server in Manage Jenkins → Configure System       ║
+          ║  □ Verify nodejs & sonar-scanner tools configured                     ║
+          ║  □ Verify infra-mgmt agent online (Status: 🟢 Online)                ║
+          ║  □ Verify 5 pipeline jobs created (Dashboard → job list)              ║
           ║                                                                        ║
           ║ NEXT STEPS:                                                            ║
-          ║  1. Log in to Jenkins UI                                               ║
-          ║  2. Verify all credentials, tools, and jobs are present                ║
-          ║  3. Wait for infra-mgmt agent to come online                           ║
-          ║  4. Run 'Infra-Provisioning' pipeline to deploy infrastructure         ║
+          ║  1. Access Jenkins UI at http://captured-ip:8080                       ║
+          ║  2. Log in and verify all components listed above                      ║
+          ║  3. Wait for infra-mgmt agent to come 🟢 Online                       ║
+          ║  4. Run 'Infra-Provisioning' pipeline via Build Now                    ║
           ║                                                                        ║
           ╚════════════════════════════════════════════════════════════════════════╝
