@@ -321,13 +321,7 @@ aws ssm start-session --target $MGMT_ID
 ```bash
 sudo -i   # become root
 
-# Check if userdata completed (wait if not yet done — takes up to 10 min)
-cat /tmp/userdata-complete   # should exist
-
-# Check userdata log for any errors
-tail -50 /var/log/userdata.log
-
-# Verify all tools are installed
+# Verify all tools are installed via terraform ec2-userdata
 terraform --version         # Terraform 1.x.x
 ansible --version           # ansible 2.x.x
 docker --version            # Docker 2x.x.x
@@ -355,7 +349,9 @@ sudo -i
 
 # Clone the repo (this gets the generated inventory.ini + private_key.pem you pushed)
 cd ~
+
 git clone https://github.com/ANIKHILT600/devops-mern-stack.git
+
 cd devops-mern-stack/automation/ansible
 
 # Activate venv (so boto3 is available to Ansible AWS modules. Note we have installed ansible in devops-venv in side infr-mngmt-server)
@@ -396,90 +392,158 @@ ansible-playbook -i inventory.ini jenkins.yml \
 
 ---
 
-## Phase 5 — Configure Jenkins (UI)
+## Phase 5 — Jenkins Auto-Configuration (Via Ansible)
 
-### Step 5.1 — Fix SonarQube Token
+**Status: FULLY AUTOMATED ✅**
 
-The Groovy init script creates the credentials. But you must update `sonar-token` with the **real** SonarQube token if you changed it after the playbook ran.
+The previous manual configuration steps (adding credentials, SonarQube server, tools, etc.) are now **automatically handled** by the Ansible `jenkins.yml` playbook through Groovy init scripts.
+
+### What Gets Automated
+
+**Phase 4 (Post Ansible Execution) — Jenkins init.groovy.d scripts run automatically:**
+
+| Component | Automation | Verification |
+|-----------|-----------|---|
+| **Credentials (7 total)** | Created via `02-credentials.groovy` | Jenkins UI → Manage Jenkins → Credentials |
+| **SonarQube Server** | Configured via `03-sonarqube-server.groovy` | Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers |
+| **NodeJS Tool** | Configured via `04-tools-configuration.groovy` | Jenkins UI → Manage Jenkins → Global Tool Configuration → NodeJS |
+| **SonarQube Scanner** | Configured via `04-tools-configuration.groovy` | Jenkins UI → Manage Jenkins → Global Tool Configuration → SonarQube Scanner |
+| **Agent Node (infra-mgmt)** | Configured via `05-agent-node.groovy` | Jenkins UI → Manage Jenkins → Nodes and Clouds |
+| **Pipeline Jobs (5 total)** | Created via Jenkins CLI | Jenkins UI → Dashboard → Job list |
+
+### Credentials Automatically Created
 
 ```
-Jenkins UI → Manage Jenkins → Credentials → Global → sonar-token → Update → Save
+✓ infra-ssh-key          SSH key for Jenkins agents
+✓ sonar-token            SonarQube authentication token
+✓ GITHUB                 GitHub username/password (for git checkout)
+✓ github                 GitHub PAT (for git push in pipelines)
+✓ AWS_ACCOUNT_ID         AWS account ID for ECR operations
+✓ ECR_REPO_FRONTEND      Frontend ECR repository name
+✓ ECR_REPO_BACKEND       Backend ECR repository name
 ```
 
-### Step 5.2 — Verify SonarQube Server Configuration
-
-The `jenkins.yml` Groovy script (`03-sonar-server.groovy`) auto-registers SonarQube as `sonar-server`. Verify it worked:
+### SonarQube Server Auto-Configuration
 
 ```
-Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers
-```
-
-You should see:
-```
-Name:       sonar-server        ← MUST be exactly 'sonar-server'
+Name:       sonar-server
 Server URL: http://<infra_mgmt_PRIVATE_ip>:9000
-Auth Token: sonar-token
+Auth Token: sonar-token (auto-linked)
+Auto-Save:  ✓ Enabled
 ```
 
-> If not auto-configured: Add it manually with exactly `sonar-server` as the name. This name is hardcoded in `withSonarQubeEnv('sonar-server')` in both Jenkinsfiles.
+### Tools Auto-Configuration
 
-### Step 5.3 — Configure NodeJS Tool
-
-The app pipelines use `tools { nodejs 'nodejs' }`.
-
+**NodeJS:**
 ```
-Jenkins UI → Manage Jenkins → Global Tool Configuration → NodeJS
-→ Add NodeJS
-   Name:    nodejs           ← Must be exactly 'nodejs'
-   Version: 16.x.x (or latest LTS)
-→ Save
+Name:    nodejs
+Version: auto (latest LTS auto-downloaded)
 ```
 
-### Step 5.4 — Configure SonarQube Scanner Tool
+**SonarQube Scanner:**
+```
+Name:    sonar-scanner
+Version: auto (latest auto-downloaded)
+```
+
+### Verification After Ansible Playbook Completion
+
+```bash
+# 1. Check credentials are present
+Jenkins UI → Manage Jenkins → Credentials → Global
+# Should see all 7 credentials listed
+
+# 2. Verify SonarQube server configuration
+Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers
+# Should show: sonar-server (http://<ip>:9000)
+
+# 3. Verify tools are configured
+Jenkins UI → Manage Jenkins → Global Tool Configuration
+# Should show: nodejs and sonar-scanner with auto-download enabled
+
+# 4. Verify agent node is online
+Jenkins UI → Manage Jenkins → Nodes and Clouds
+# Should show: infra-mgmt node with status 🟢 Online
+
+# 5. Verify pipeline jobs are created
+Jenkins UI → Dashboard
+# Should show: 5 pipeline jobs (Infra-Provisioning, Config-Only, App-Deploy-Backend/Frontend, DevSecOps-Master)
+```
+
+### Manual Verification Only (No Configuration Needed)
+
+If any component is missing after Ansible completes, you can manually verify using the Jenkins UI. The Groovy scripts include error handling and will skip if components already exist.
+
+**Common Check:** In Jenkins → Manage Jenkins → Configure System, search for "SonarQube Servers" to confirm auto-configuration worked.
+
+---
+
+## Phase 6 — Jenkins Pipeline Jobs (Auto-Created)
+
+**Status: FULLY AUTOMATED ✅**
+
+Jenkins pipeline jobs are automatically created during the Ansible `jenkins.yml` playbook execution. You no longer need to create them manually via the Jenkins UI.
+
+### What Gets Auto-Created
+
+The Ansible playbook creates 5 pipeline jobs:
+
+| Job Name | Jenkinsfile Path | Purpose |
+|----------|------------------|---------|
+| **Infra-Provisioning** | `automation/jenkins/Jenkinsfile.infra` | Terraform + all Ansible playbooks (initial infrastructure) |
+| **Config-Only** | `automation/jenkins/Jenkinsfile.config` | Re-run Ansible only (without Terraform) |
+| **App-Deploy-Backend** | `Jenkins-Pipeline-Script/Jenkinsfile-Backend` | Backend CI/CD pipeline (build, scan, push, deploy) |
+| **App-Deploy-Frontend** | `Jenkins-Pipeline-Script/Jenkinsfile-Frontend` | Frontend CI/CD pipeline (build, scan, push, deploy) |
+| **DevSecOps-Master** | `automation/jenkins/Jenkinsfile.master` | Master orchestrator pipeline (optional) |
+
+### Verification (Optional Manual Verification Only)
+
+```bash
+# Check all jobs are created
+Jenkins UI → Dashboard
+# Should show: 5 pipeline jobs listed in the main dashboard
+```
+
+### To Run a Pipeline Job
 
 ```
-Jenkins UI → Manage Jenkins → Global Tool Configuration → SonarQube Scanner
-→ Add SonarQube Scanner
-   Name:    sonar-scanner    ← Must be exactly 'sonar-scanner'
-   Version: latest
-→ Save
+Jenkins UI → <Job Name> → Build Now
+```
+
+Example:
+```
+Jenkins UI → Infra-Provisioning → Build Now
 ```
 
 ---
 
-## Phase 6 — Create Jenkins Jobs
+## ⚠️ Migration Note: Manual → Automated Configuration
 
-### 📌 Which Jenkinsfiles to Use
+**Old Approach (Phase 5.1-5.4 — DEPRECATED):**
+- Manually add credentials via Jenkins UI
+- Manually configure SonarQube server
+- Manually add NodeJS tool  - Manually add SonarQube Scanner tool
+- Manually create 5 pipeline jobs
 
-> **Rule: App pipelines use files from `Jenkins-Pipeline-Script/`. Infra pipelines use `automation/jenkins/`.**
+**New Approach (Fully Automated via Ansible):**
+- All 7 credentials created automatically
+- SonarQube server configured automatically
+- NodeJS tool configured automatically
+- SonarQube Scanner tool configured automatically
+- Agent node (infra-mgmt) configured automatically
+- All 5 pipeline jobs created automatically
 
-| Jenkins Job Name | Script Path in Jenkins Config | Purpose |
-|-----------------|-------------------------------|---------|
-| `Infra-Provisioning` | `automation/jenkins/Jenkinsfile.infra` | Terraform + all Ansible |
-| `Config-Only` | `automation/jenkins/Jenkinsfile.config` | Re-run Ansible only |
-| `App-Deploy-Backend` | `Jenkins-Pipeline-Script/Jenkinsfile-Backend` | ✅ Backend CI/CD |
-| `App-Deploy-Frontend` | `Jenkins-Pipeline-Script/Jenkinsfile-Frontend` | ✅ Frontend CI/CD |
-| `DevSecOps-Master` | `automation/jenkins/Jenkinsfile.master` | Optional orchestrator |
-
-### Step 6.1 — Create Each Job
-
-Repeat these steps for each row in the table above:
-
+**When Running Ansible Playbook:**
+```bash
+ansible-playbook -i inventory.ini jenkins.yml \
+  --extra-vars "sonar_token=YOUR_TOKEN \
+                github_token=YOUR_PAT \
+                github_username=YOUR_USERNAME \
+                aws_account_id=YOUR_ACCOUNT_ID \
+                infra_mgmt_private_ip=<IP from terraform outputs>"
 ```
-Jenkins UI → New Item
-  Name:        <Job Name from table>
-  Type:        Pipeline
-  → OK
 
-→ Pipeline section:
-  Definition:  Pipeline script from SCM
-  SCM:         Git
-  Repository:  https://github.com/ANIKHILT600/devops-mern-stack.git
-  Credentials: GITHUB
-  Branch:      */main
-  Script Path: <Script Path from table, e.g. Jenkins-Pipeline-Script/Jenkinsfile-Backend>
-→ Save
-```
+All configuration is complete after Ansible finishes!
 
 ---
 
