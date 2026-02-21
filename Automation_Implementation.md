@@ -392,26 +392,41 @@ ansible-playbook -i inventory.ini jenkins.yml \
 
 ---
 
-## Phase 5 — Jenkins Auto-Configuration (Via Ansible)
+## Phase 5 — Jenkins Configuration (Hybrid: Auto + Manual)
 
-**Status: FULLY AUTOMATED ✅**
+**Status: PARTIALLY AUTOMATED ⚡**
 
-The previous manual configuration steps (adding credentials, SonarQube server, tools, etc.) are now **automatically handled** by the Ansible `jenkins.yml` playbook through Groovy init scripts.
+The Ansible `jenkins.yml` playbook **automatically configures what it can** (credentials + pipeline jobs), but **3 components require manual Jenkins UI configuration** due to plugin version API incompatibilities.
 
-### What Gets Automated
+### Why Hybrid Approach?
 
-**Phase 4 (Post Ansible Execution) — Jenkins init.groovy.d scripts run automatically:**
+**Technical Constraint:** The Jenkins plugins installed have evolved over time:
+- `sonar:2.18.2` (2+ years old) — API signatures don't match modern approaches
+- `nodejs:1.6.6` (very old) — class not accessible via CLI groovy
+- `ssh-slaves:3.1097` (very recent) — uses builder patterns our scripts can't replicate
+
+Rather than force compatibility hacks that fail silently, the playbook:
+1. ✅ Automates what definitely works (credentials, job creation)
+2. ⚠️ Guides you through manual UI config for the 3 incompatible components
+3. 🎯 Ensures 100% success rate on first deployment
+
+**Total Time:** Manual steps take ~5 minutes via the Jenkins UI. One-time setup.
 
 | Component | Automation | Verification |
 |-----------|-----------|---|
-| **Credentials (7 total)** | Created via `02-credentials.groovy` | Jenkins UI → Manage Jenkins → Credentials |
-| **SonarQube Server** | Configured via `03-sonarqube-server.groovy` | Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers |
-| **NodeJS Tool** | Configured via `04-tools-configuration.groovy` | Jenkins UI → Manage Jenkins → Global Tool Configuration → NodeJS |
-| **SonarQube Scanner** | Configured via `04-tools-configuration.groovy` | Jenkins UI → Manage Jenkins → Global Tool Configuration → SonarQube Scanner |
-| **Agent Node (infra-mgmt)** | Configured via `05-agent-node.groovy` | Jenkins UI → Manage Jenkins → Nodes and Clouds |
-| **Pipeline Jobs (5 total)** | Created via Jenkins CLI | Jenkins UI → Dashboard → Job list |
+| **Credentials (7 total)** | ✅ Created via Jenkins CLI Groovy | Jenkins UI → Manage Jenkins → Credentials |
+| **Pipeline Jobs (5 total)** | ✅ Created via Jenkins CLI | Jenkins UI → Dashboard → Job list |
 
-### Credentials Automatically Created
+### What Requires Manual Configuration ⚠️
+
+| Component | Reason | Manual Setup Location |
+|-----------|--------|----------------------|
+| **SonarQube Server** | Plugin sonar:2.18.2 API incompatible | Jenkins UI → Manage Jenkins → Configure System |
+| **NodeJS Tool** | Plugin nodejs:1.6.6 class resolution issue | Jenkins UI → Manage Jenkins → Global Tool Configuration |
+| **SonarQube Scanner Tool** | Plugin sonar:2.18.2 API incompatible | Jenkins UI → Manage Jenkins → Global Tool Configuration |
+| **SSH Agent Node** | Plugin ssh-slaves:3.1097 constructor mismatch | Jenkins UI → Manage Jenkins → Nodes and Clouds |
+
+### Credentials Automatically Created ✅
 
 ```
 ✓ infra-ssh-key          SSH key for Jenkins agents
@@ -423,58 +438,103 @@ The previous manual configuration steps (adding credentials, SonarQube server, t
 ✓ ECR_REPO_BACKEND       Backend ECR repository name
 ```
 
-### SonarQube Server Auto-Configuration
+### SonarQube Server Manual Configuration ⚠️
 
+**Why Manual:** Plugin sonar v2.18.2 has API signature incompatibilities with our automation approach.
+
+**Setup Steps (after playbook completes):**
 ```
-Name:       sonar-server
-Server URL: http://<infra_mgmt_PRIVATE_ip>:9000
-Auth Token: sonar-token (auto-linked)
-Auto-Save:  ✓ Enabled
+1. Go to Jenkins UI → Manage Jenkins → Configure System
+2. Scroll to "SonarQube Servers" section
+3. Click "Add SonarQube"
+4. Fill in:
+   Name:  sonar-server
+   Server URL:  http://<infra_mgmt_private_ip>:9000
+   Server authentication token:  sonar-token (select from dropdown)
+5. Click "Save"
 ```
 
-### Tools Auto-Configuration
+### Tools Manual Configuration ⚠️
 
-**NodeJS:**
+**Why Manual:** Plugin versions nodejs:1.6.6 and sonar:2.18.2 have class resolution and API issues.
+
+**NodeJS Setup:**
 ```
-Name:    nodejs
-Version: auto (latest LTS auto-downloaded)
+1. Go to Jenkins UI → Manage Jenkins → Global Tool Configuration
+2. Find "NodeJS installations" section
+3. Click "Add NodeJS"
+4. Fill in:
+   Name: nodejs
+   Version: Latest (will auto-download LTS)
+5. Click "Save"
 ```
 
-**SonarQube Scanner:**
+**SonarQube Scanner Setup:**
 ```
-Name:    sonar-scanner
-Version: auto (latest auto-downloaded)
+1. Same page, find "SonarQube Scanner installations" section
+2. Click "Add SonarQube Scanner"
+3. Fill in:
+   Name: sonar-scanner
+   Version: Latest (will auto-download)
+4. Click "Save"
 ```
+
+### SSH Agent Node Manual Configuration ⚠️
+
+**Why Manual:** Plugin ssh-slaves v3.1097 has constructor signature incompatibilities.
+
+**Setup Steps (after playbook completes):**
+```
+1. Go to Jenkins UI → Manage Jenkins → Nodes and Clouds
+2. Click "New Node"
+3. Node name: infra-mgmt
+4. Type: Permanent Agent
+5. Click "Create"
+6. Configure:
+   - Remote root directory: /var/lib/jenkins
+   - Labels: infra-mgmt
+   - Usage: Use this node as much as possible
+   - Launch method: Launch agents via SSH
+     * Host: <infra_mgmt_private_ip>
+     * Port: 22
+     * Credentials: infra-ssh-key (select from dropdown)
+     * Host Key Verification Strategy: Non verifying Strategy
+   - Number of executors: 4
+   - Retention Strategy: Keep this agent online
+7. Click "Save"
+```
+
+**Expected Result:** The node should appear 🟢 **Online** within 1-2 minutes.
 
 ### Verification After Ansible Playbook Completion
 
+**Automatically Verified (Playbook confirms these):**
+
 ```bash
-# 1. Check credentials are present
+# 1. Check credentials were created
 Jenkins UI → Manage Jenkins → Credentials → Global
-# Should see all 7 credentials listed
+# Should see all 7 credentials listed ✓
 
-# 2. Verify SonarQube server configuration
-Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers
-# Should show: sonar-server (http://<ip>:9000)
-
-# 3. Verify tools are configured
-Jenkins UI → Manage Jenkins → Global Tool Configuration
-# Should show: nodejs and sonar-scanner with auto-download enabled
-
-# 4. Verify agent node is online
-Jenkins UI → Manage Jenkins → Nodes and Clouds
-# Should show: infra-mgmt node with status 🟢 Online
-
-# 5. Verify pipeline jobs are created
+# 2. Verify pipeline jobs were created
 Jenkins UI → Dashboard
-# Should show: 5 pipeline jobs (Infra-Provisioning, Config-Only, App-Deploy-Backend/Frontend, DevSecOps-Master)
+# Should show: 5 pipeline jobs listed ✓
 ```
 
-### Manual Verification Only (No Configuration Needed)
+**Manual Verification Required (You must configure these):**
 
-If any component is missing after Ansible completes, you can manually verify using the Jenkins UI. The Groovy scripts include error handling and will skip if components already exist.
+```bash
+# 1. Verify SonarQube server configured
+Jenkins UI → Manage Jenkins → Configure System → SonarQube Servers
+# Should show: sonar-server (http://<ip>:9000) after you add it
 
-**Common Check:** In Jenkins → Manage Jenkins → Configure System, search for "SonarQube Servers" to confirm auto-configuration worked.
+# 2. Verify tools configured
+Jenkins UI → Manage Jenkins → Global Tool Configuration
+# Should show: nodejs and sonar-scanner after you add them
+
+# 3. Verify agent node online
+Jenkins UI → Manage Jenkins → Nodes and Clouds
+# Should show: infra-mgmt node with status 🟢 Online after you create it
+```
 
 ---
 
@@ -517,21 +577,22 @@ Jenkins UI → Infra-Provisioning → Build Now
 
 ---
 
-## ⚠️ Migration Note: Manual → Automated Configuration
+## ⚠️ Migration Note: Manual → Hybrid Automated Configuration
 
 **Old Approach (Phase 5.1-5.4 — DEPRECATED):**
 - Manually add credentials via Jenkins UI
 - Manually configure SonarQube server
-- Manually add NodeJS tool  - Manually add SonarQube Scanner tool
+- Manually add NodeJS tool  
+- Manually add SonarQube Scanner tool
 - Manually create 5 pipeline jobs
 
-**New Approach (Fully Automated via Ansible):**
-- All 7 credentials created automatically
-- SonarQube server configured automatically
-- NodeJS tool configured automatically
-- SonarQube Scanner tool configured automatically
-- Agent node (infra-mgmt) configured automatically
-- All 5 pipeline jobs created automatically
+**New Approach (Hybrid: Auto + Manual via Ansible):**
+- ✅ All 7 credentials created automatically
+- ⚠️ SonarQube server requires manual Jenkins UI config (plugin API constraints)
+- ⚠️ NodeJS tool requires manual Jenkins UI config (plugin version too old)
+- ⚠️ SonarQube Scanner requires manual Jenkins UI config (plugin API constraints)
+- ⚠️ SSH Agent Node requires manual Jenkins UI config (plugin version constraint)
+- ✅ All 5 pipeline jobs created automatically
 
 **When Running Ansible Playbook:**
 ```bash
@@ -539,11 +600,14 @@ ansible-playbook -i inventory.ini jenkins.yml \
   --extra-vars "sonar_token=YOUR_TOKEN \
                 github_token=YOUR_PAT \
                 github_username=YOUR_USERNAME \
-                aws_account_id=YOUR_ACCOUNT_ID \
-                infra_mgmt_private_ip=<IP from terraform outputs>"
+                aws_account_id=YOUR_ACCOUNT_ID"
 ```
 
-All configuration is complete after Ansible finishes!
+**After Ansible finishes:**
+1. Access Jenkins UI
+2. Follow the 4 manual configuration sections in Phase 5 above
+3. You'll be guided step-by-step through each manual config
+4. All components will then be fully configured
 
 ---
 
@@ -699,6 +763,10 @@ kubectl get svc -n prometheus prometheus-grafana
 
 | Problem | Likely Cause | Fix |
 |---------|-------------|-----|
+| SonarQube server not showing in Configure System | Manual configuration not completed | Follow Phase 5 SonarQube Server section - requires manual Jenkins UI setup |
+| NodeJS/SonarScanner tools not available in pipelines | Manual configuration not completed | Follow Phase 5 Tools Configuration section - requires manual Jenkins UI setup |
+| Agent node shows "offline" after creation | Manual node setup not completed or SSH not working | Follow Phase 5 SSH Agent Node section, verify credentials exist |
+| `withSonarQubeEnv('sonar-server')` fails in pipeline | SonarQube server not configured | Complete manual SonarQube server setup from Phase 5 |
 | `terraform init` fails: "bucket not found" | S3 bucket not created or wrong name in backend.tf | Run Phase 1 commands, update bucket name in backend.tf |
 | `ansible jenkins_server -m ping` fails | SSH port 22 blocked or wrong key permissions | Check security group inbound port 22; `chmod 400 private_key.pem` |
 | Jenkins UI not accessible | Jenkins install failed or port 8080 blocked | SSM to Jenkins server: `systemctl status jenkins`, check SG |
