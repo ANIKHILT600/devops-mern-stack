@@ -23,15 +23,36 @@ variable "subnet_ids" {
 # endpoint_public_access = false → cluster API only reachable
 # from within the VPC (jump server is the gateway)
 # ─────────────────────────────────────────────────────────────
+resource "aws_cloudwatch_log_group" "eks_cluster" {
+  name              = "/aws/eks/${var.cluster_name}/cluster"
+  retention_in_days = 7
+  tags = { Name = "${var.cluster_name}-cluster-logs" }
+}
+
 resource "aws_eks_cluster" "main" {
   name     = var.cluster_name
   role_arn = var.cluster_role_arn
+  version  = "1.29"
 
   vpc_config {
     subnet_ids              = var.subnet_ids
     endpoint_private_access = true
     endpoint_public_access  = false
   }
+
+  enabled_cluster_log_types = [
+    "api",
+    "audit",
+    "authenticator",
+    "controllerManager",
+    "scheduler"
+  ]
+
+  depends_on = [
+    aws_cloudwatch_log_group.eks_cluster
+  ]
+
+  tags = { Name = var.cluster_name }
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -79,4 +100,9 @@ output "cluster_endpoint" {
 output "cluster_ca_certificate" {
   description = "Base64-encoded cluster CA certificate"
   value       = aws_eks_cluster.main.certificate_authority[0].data
+}
+
+output "cluster_security_group_id" {
+  description = "EKS control plane security group ID (for ingress rule management)"
+  value       = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
 }

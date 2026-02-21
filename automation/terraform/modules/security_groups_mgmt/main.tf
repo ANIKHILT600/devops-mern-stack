@@ -56,6 +56,16 @@ resource "aws_security_group" "mgmt" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Allow return HTTPS traffic from EKS API (port 443)
+  # from production VPC private subnets
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["192.168.0.0/16"]
+    description = "EKS API return traffic from prod VPC"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

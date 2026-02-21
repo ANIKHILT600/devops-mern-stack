@@ -27,11 +27,15 @@ resource "aws_subnet" "public" {
   cidr_block              = var.public_subnet_cidrs[count.index]
   availability_zone       = var.azs[count.index]
   map_public_ip_on_launch = true
-  tags = {
-    Name = "${var.project_name}-public-subnet-${count.index + 1}"
-    "kubernetes.io/role/elb" = "1"
-    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-  }
+  tags = merge(
+    {
+      Name = "${var.project_name}-public-subnet-${count.index + 1}"
+    },
+    var.cluster_name != "" ? {
+      "kubernetes.io/role/elb"                    = "1"
+      "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    } : {}
+  )
 }
 
 resource "aws_subnet" "private" {
@@ -39,11 +43,15 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = var.private_subnet_cidrs[count.index]
   availability_zone = var.azs[count.index]
-  tags = {
-    Name = "${var.project_name}-private-subnet-${count.index + 1}"
-    "kubernetes.io/role/internal-elb" = "1"
-    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-  }
+  tags = merge(
+    {
+      Name = "${var.project_name}-private-subnet-${count.index + 1}"
+    },
+    var.cluster_name != "" ? {
+      "kubernetes.io/role/internal-elb"           = "1"
+      "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    } : {}
+  )
 }
 
 resource "aws_internet_gateway" "igw" {
@@ -104,3 +112,5 @@ resource "aws_route_table_association" "private" {
 output "vpc_id" { value = aws_vpc.main.id }
 output "public_subnets" { value = aws_subnet.public[*].id }
 output "private_subnets" { value = aws_subnet.private[*].id }
+output "route_table_public_id" { value = aws_route_table.public.id }
+output "route_table_private_id" { value = try(aws_route_table.private[0].id, "") }

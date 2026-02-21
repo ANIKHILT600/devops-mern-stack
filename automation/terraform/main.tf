@@ -200,7 +200,7 @@ locals {
     # Completion marker: /tmp/userdata-complete
     # ─────────────────────────────────────────────────────────────────
     exec > /var/log/userdata.log 2>&1
-    # set -e
+
     # Trap errors: log the failing line number instead of a silent exit
     set -euo pipefail
     trap 'echo "=== ERROR: Script failed at line $LINENO. Check /var/log/userdata.log ===" >&2' ERR
@@ -208,9 +208,9 @@ locals {
     echo "=== [1/10] Updating system packages ==="
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y wget curl unzip git gnupg lsb-release \
+    apt-get install -y \
+      wget curl unzip git gnupg lsb-release \
       software-properties-common apt-transport-https ca-certificates \
-      # python3 python3-pip openjdk-17-jre
       python3 python3-pip python3-venv openjdk-17-jre
 
     echo "=== [2/10] Installing SSM Agent ==="
@@ -229,9 +229,6 @@ locals {
     apt-get update -y && apt-get install -y terraform
 
     echo "=== [4/10] Installing Ansible + AWS Python libs ==="
-    # pip3 install --break-system-packages ansible boto3 botocore
-    # Install required Ansible collections
-    # su - ubuntu -c "ansible-galaxy collection install community.docker amazon.aws community.general --upgrade" || true
     # Ubuntu 22.04 (Jammy) ships pip 22.0.x which does NOT support
     # --break-system-packages. Use a dedicated virtualenv instead.
     python3 -m venv /opt/devops-venv
@@ -267,19 +264,31 @@ locals {
     systemctl enable docker
     systemctl start docker
     usermod -aG docker ubuntu
-    chmod 666 /var/run/docker.sock
+    chmod 660 /var/run/docker.sock
 
     echo "=== [7/10] Setting vm.max_map_count for SonarQube ==="
     sysctl -w vm.max_map_count=262144
     echo "vm.max_map_count=262144" >> /etc/sysctl.conf
 
-    echo "=== [8/10] Starting SonarQube container ==="
+    echo "=== [7.5/10] Creating Docker Persistent Volume for SonarQube ==="
+    # Create a named Docker volume for SonarQube data persistence
+    # Docker volumes are managed by Docker daemon and persist across container restarts
+    docker volume create sonarqube_data || true
+
+    echo "=== [8/10] Starting SonarQube container with Docker persistent volume ==="
+    # Use Docker named volume instead of bind mount (more portable, Docker-native)
+    # sonarqube_data → Docker volume name
+    # /var/lib/sonarqube → Container path where SonarQube stores data
     docker run -d \
       --name sonar \
       --restart unless-stopped \
       -p 9000:9000 \
       -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+      -v sonarqube_data:/var/lib/sonarqube \
       sonarqube:lts-community
+
+    # Verify volume was mounted
+    docker inspect sonar | grep -A 3 Mounts | head -5
 
     echo "=== [9/10] Installing Trivy ==="
     wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
@@ -310,7 +319,6 @@ module "mgmt_server" {
   key_name               = aws_key_pair.generated_key.key_name
   user_data_script       = local.mgmt_server_userdata
 }
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # SERVER 3: JUMP SERVER (Production VPC)
